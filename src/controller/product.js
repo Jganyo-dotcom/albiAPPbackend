@@ -1,4 +1,4 @@
-import { Product } from "../models/Product.js";
+import { Product } from "../models/product.js";
 import { Expense } from "../models/Expense.js";
 
 // Helper function to format standard time (e.g. 05:21 PM)
