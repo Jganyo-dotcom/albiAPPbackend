@@ -1,5 +1,5 @@
 import Customer from "../models/customer.js";
-import Sale from "../models/Sale.js";
+import Sale from "../models/sale.js";
 import { Product } from "../models/product.js";
 import ExcelJS from "exceljs/dist/exceljs.js";
 import PaymentLedger from "../models/paymentLedger.js";
