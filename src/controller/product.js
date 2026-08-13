@@ -1,5 +1,6 @@
 import { Product } from "../models/product.js";
 import { Expense } from "../models/Expense.js";
+import Sale from "../models/Sale.js"; // Imported to include Sales in Dashboard Metrics
 
 // Helper function to format standard time (e.g. 05:21 PM)
 const getCurrentStandardTime = () => {
@@ -20,45 +21,57 @@ const getCurrentFormattedDate = () => {
 // ==========================================
 export const getDashboardMetrics = async (req, res) => {
   try {
-    // Total Products Count
-    const totalProducts = await Product.countDocuments();
+    const [
+      totalProducts,
+      lowStockCount,
+      inventoryValueResult,
+      expensesValueResult,
+      salesValueResult,
+    ] = await Promise.all([
+      // Total Products Count
+      Product.countDocuments(),
 
-    // Low Stock Items Count
-    const lowStockCount = await Product.countDocuments({
-      $expr: { $lte: ["$stockQuantity", "$lowStockThreshold"] },
-    });
+      // Low Stock Items Count
+      Product.countDocuments({
+        $expr: { $lte: ["$stockQuantity", "$lowStockThreshold"] },
+      }),
 
-    // Total Inventory Retail Value Calculation: Sum(stockQuantity * unitPrice)
-    const inventoryValueResult = await Product.aggregate([
-      {
-        $group: {
-          _id: null,
-          totalRetailValue: {
-            $sum: { $multiply: ["$stockQuantity", "$unitPrice"] },
+      // Total Inventory Retail Value Calculation: Sum(stockQuantity * unitPrice)
+      Product.aggregate([
+        {
+          $group: {
+            _id: null,
+            totalRetailValue: {
+              $sum: { $multiply: ["$stockQuantity", "$unitPrice"] },
+            },
           },
         },
-      },
-    ]);
+      ]),
 
-    const totalInventoryValue =
-      inventoryValueResult.length > 0
-        ? inventoryValueResult[0].totalRetailValue
-        : 0;
-
-    // Total Expenses Calculation: Sum(amount)
-    const expensesValueResult = await Expense.aggregate([
-      {
-        $group: {
-          _id: null,
-          totalExpensesAmount: { $sum: "$amount" },
+      // Total Expenses Calculation: Sum(amount)
+      Expense.aggregate([
+        {
+          $group: {
+            _id: null,
+            totalExpensesAmount: { $sum: "$amount" },
+          },
         },
-      },
+      ]),
+
+      // Total Revenue Calculation from Sales
+      Sale.aggregate([
+        {
+          $group: {
+            _id: null,
+            totalRevenue: { $sum: "$totalAmount" },
+          },
+        },
+      ]),
     ]);
 
-    const totalExpenses =
-      expensesValueResult.length > 0
-        ? expensesValueResult[0].totalExpensesAmount
-        : 0;
+    const totalInventoryValue = inventoryValueResult[0]?.totalRetailValue || 0;
+    const totalExpenses = expensesValueResult[0]?.totalExpensesAmount || 0;
+    const totalRevenue = salesValueResult[0]?.totalRevenue || 0;
 
     return res.status(200).json({
       success: true,
@@ -67,6 +80,8 @@ export const getDashboardMetrics = async (req, res) => {
         lowStockCount,
         totalInventoryValue: parseFloat(totalInventoryValue.toFixed(2)),
         totalExpenses: parseFloat(totalExpenses.toFixed(2)),
+        totalRevenue: parseFloat(totalRevenue.toFixed(2)),
+        netProfit: parseFloat((totalRevenue - totalExpenses).toFixed(2)),
       },
     });
   } catch (error) {
@@ -84,15 +99,18 @@ export const getProducts = async (req, res) => {
     const products = await Product.find().sort({ createdAt: -1 });
 
     const formattedProducts = products.map((product) => {
-      const margin = product.unitPrice - product.costPrice;
+      const unitPrice = product.unitPrice || 0;
+      const costPrice = product.costPrice || 0;
+      const margin = unitPrice - costPrice;
+
       return {
         id: product._id,
         productCode: product.productCode,
         name: product.name,
         category: product.category,
         stockQuantity: product.stockQuantity,
-        costPrice: product.costPrice,
-        unitPrice: product.unitPrice,
+        costPrice,
+        unitPrice,
         margin: parseFloat(margin.toFixed(2)),
         lowStockThreshold: product.lowStockThreshold,
         isLowStock: product.stockQuantity <= product.lowStockThreshold,
@@ -106,10 +124,8 @@ export const getProducts = async (req, res) => {
 };
 
 // Add New Product + Auto Generate Product Code (PRD-101)
-
 export const createProduct = async (req, res) => {
   try {
-    // 1. Detect if frontend sent an 'items' array or a single object
     const rawItems = Array.isArray(req.body.items)
       ? req.body.items
       : [req.body];
@@ -121,10 +137,8 @@ export const createProduct = async (req, res) => {
       });
     }
 
-    // 2. Fetch current total count to increment PRD-XXX codes if missing
     const existingCount = await Product.countDocuments();
 
-    // 3. Format and sanitize every item to match schema
     const preparedItems = rawItems.map((item, index) => {
       const generatedCode = `PRD-${101 + existingCount + index}`;
       const finalCode = item.sku || item.productCode || generatedCode;
@@ -133,18 +147,18 @@ export const createProduct = async (req, res) => {
         productCode: finalCode,
         name: item.name,
         category: item.category,
-        packsPurchased: parseInt(item.packsPurchased) || 0,
-        unitsPerPack: parseInt(item.unitsPerPack) || 1,
-        stockQuantity: parseInt(item.totalQuantity ?? item.stockQuantity) || 0,
+        packsPurchased: parseInt(item.packsPurchased, 10) || 0,
+        unitsPerPack: parseInt(item.unitsPerPack, 10) || 1,
+        stockQuantity:
+          parseInt(item.totalQuantity ?? item.stockQuantity, 10) || 0,
         costPricePerPack: parseFloat(item.costPricePerPack) || 0.0,
         costPrice: parseFloat(item.unitCostPrice ?? item.costPrice) || 0.0,
         unitPrice: parseFloat(item.unitSellingPrice ?? item.unitPrice) || 0.0,
         expectedProfit: parseFloat(item.expectedProfit) || 0.0,
-        lowStockThreshold: parseInt(item.lowStockThreshold) || 4,
+        lowStockThreshold: parseInt(item.lowStockThreshold, 10) || 4,
       };
     });
 
-    // 4. Insert into database
     const createdProducts = await Product.insertMany(preparedItems);
 
     return res.status(201).json({
@@ -168,11 +182,12 @@ export const restockProduct = async (req, res) => {
     const { productId } = req.params;
     const { addedQuantity } = req.body;
 
-    const qtyToAdd = parseInt(addedQuantity);
+    const qtyToAdd = parseInt(addedQuantity, 10);
     if (isNaN(qtyToAdd) || qtyToAdd <= 0) {
-      return res
-        .status(400)
-        .json({ success: false, message: "Valid quantity is required" });
+      return res.status(400).json({
+        success: false,
+        message: "Valid positive quantity is required",
+      });
     }
 
     const updatedProduct = await Product.findByIdAndUpdate(
@@ -210,7 +225,6 @@ export const updateProductPrices = async (req, res) => {
       lowStockThreshold,
     } = req.body;
 
-    // Construct update payload dynamically based on incoming body fields
     const updateFields = {};
 
     if (name !== undefined) updateFields.name = name;
@@ -266,22 +280,23 @@ export const createExpense = async (req, res) => {
   try {
     const { category, amount, purpose, paymentMethod } = req.body;
 
-    // Auto-generate code if missing
     let expenseCode = req.body.expenseCode;
     if (!expenseCode) {
       const count = await Expense.countDocuments();
       expenseCode = `EXP-${301 + count}`;
     }
 
+    const userId = req.user?.id || req.user?._id || null;
+
     const newExpense = await Expense.create({
       expenseCode,
-      date: req.body.date || getCurrentFormattedDate(), // YYYY-MM-DD
-      time: req.body.time || getCurrentStandardTime(), // 05:21 PM
+      date: req.body.date || getCurrentFormattedDate(),
+      time: req.body.time || getCurrentStandardTime(),
       category,
       amount: parseFloat(amount),
       purpose,
       paymentMethod: paymentMethod || "Cash",
-      loggedBy: req.user.id,
+      loggedBy: userId,
     });
 
     return res.status(201).json({
@@ -291,5 +306,50 @@ export const createExpense = async (req, res) => {
     });
   } catch (error) {
     return res.status(400).json({ success: false, message: error.message });
+  }
+};
+
+// Reverse/Delete an expense and recalculate total expenses
+export const reverseExpense = async (req, res) => {
+  try {
+    const { expenseId } = req.params;
+
+    const expense = await Expense.findById(expenseId);
+    if (!expense) {
+      return res.status(404).json({
+        success: false,
+        message: "Expense record not found.",
+      });
+    }
+
+    const reversedAmount = expense.amount || 0;
+
+    await Expense.findByIdAndDelete(expenseId);
+
+    const aggregateResult = await Expense.aggregate([
+      {
+        $group: {
+          _id: null,
+          totalExpenses: { $sum: "$amount" },
+        },
+      },
+    ]);
+
+    const newTotalExpenses = aggregateResult[0]?.totalExpenses || 0;
+
+    return res.status(200).json({
+      success: true,
+      message: "Expense reversed successfully.",
+      reversedExpenseId: expenseId,
+      slashedAmount: reversedAmount,
+      totalExpenses: newTotalExpenses,
+    });
+  } catch (error) {
+    console.error("Error reversing expense:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error: Failed to reverse expense.",
+      error: error.message,
+    });
   }
 };

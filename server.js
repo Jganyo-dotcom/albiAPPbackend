@@ -4,6 +4,7 @@ import cors from "cors";
 import userRoutes from "./src/routes/user.routes.js";
 import inventoryRoute from "./src/routes/inventoryRoutes.js";
 import connectDB from "./src/config/db.js";
+import customerRoutes from "./src/routes/customerRoutes.js";
 import morgan from "morgan"; // 1. Import Morgan
 
 const app = express();
@@ -42,6 +43,7 @@ app.use(express.json());
 // Routes
 app.use("/api/auth", userRoutes);
 app.use("/api/product", inventoryRoute);
+app.use("/api/customer", customerRoutes);
 
 // Healthcheck Route
 app.get("/", (req, res) => {

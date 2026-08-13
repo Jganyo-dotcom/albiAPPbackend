@@ -7,12 +7,13 @@ import {
   updateProductPrices,
   getExpenses,
   createExpense,
+  reverseExpense,
 } from "../controller/product.js";
 import { protect } from "../middleware/auth.js";
 
 const router = express.Router();
 
-router.use(protect)
+router.use(protect);
 
 // Metrics
 router.get("/metrics", getDashboardMetrics);
@@ -21,10 +22,12 @@ router.get("/metrics", getDashboardMetrics);
 router.get("/products", getProducts);
 router.post("/products", createProduct);
 router.patch("/products/:productId/restock", restockProduct);
-router.patch("/products/:productId/price", updateProductPrices);
+router.patch("/products/:productId/price", updateProductPrices); //same as edit he whole thing
+
 
 // Expense Routes
 router.get("/expenses", getExpenses);
 router.post("/expenses", createExpense);
+router.delete("/expenses/:expenseId", reverseExpense);
 
 export default router;
