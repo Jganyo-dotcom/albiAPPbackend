@@ -7,12 +7,6 @@ const paymentLedgerSchema = new mongoose.Schema(
       ref: "Customer",
       required: true,
     },
-    company: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Company",
-      required: true,
-      index: true, // Speeds up queries across all store sales
-    },
     inputer: {
       type: mongoose.Schema.Types.ObjectId, // Fixed path to ObjectId
       required: true,
