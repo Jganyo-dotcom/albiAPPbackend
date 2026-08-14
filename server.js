@@ -18,7 +18,7 @@ connectDB();
 // Middleware
 const allowedOrigins = [
 //   "http://localhost:5173", // Standard Vite frontend port
-  "https://albiappbackend.onrender.com",
+  "https://finconmanager.netlify.app",
 ];
 
 app.use(
