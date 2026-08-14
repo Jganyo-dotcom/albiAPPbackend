@@ -1,6 +1,6 @@
 import { Product } from "../models/product.js";
 import { Expense } from "../models/Expense.js";
-import Sale from "../models/Sale.js"; // Imported to include Sales in Dashboard Metrics
+import Sale from "../models/sale.js"; // Imported to include Sales in Dashboard Metrics
 
 // Helper function to format standard time (e.g. 05:21 PM)
 const getCurrentStandardTime = () => {
