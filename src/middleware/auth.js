@@ -13,18 +13,19 @@ export const protect = async (req, res, next) => {
       // 2. Extract token from the "Bearer <token>" string
       token = req.headers.authorization.split(" ")[1];
 
-      // 3. Verify the token signature using your environment variable secret
+      // 3. Verify the token signature using secret
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-      // 4. Fetch user from DB using the ID decoded from the token (exclude password)
-      req.user = await User.findById(decoded.id).select("-password");
+      // 4. Fetch user from DB using decoded ID (exclude password)
+      const user = await User.findById(decoded.id).select("-password");
 
       // 5. If user no longer exists in DB, deny access
-      if (!req.user) {
+      if (!user) {
         return res.status(401).json({ message: "User account not found" });
       }
 
-      // 6. Continue to the next route or middleware
+      req.user = decoded; // Extracted directly from JWT
+
       return next();
     } catch (error) {
       console.error("Token verification error:", error);

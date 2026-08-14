@@ -9,6 +9,17 @@ const expenseSchema = new mongoose.Schema(
       trim: true,
       uppercase: true, // Stores as EXP-301
     },
+    companyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Company",
+      required: true,
+      index: true, // Speeds up queries across all store sales
+    },
+    inputer: {
+      type: mongoose.Schema.Types.ObjectId, // Fixed path to ObjectId
+      required: true,
+      ref: "User", // Fixed: Model names must be passed as a string
+    },
     date: {
       type: String, // Saved as YYYY-MM-DD
       required: [true, "Date is required"],

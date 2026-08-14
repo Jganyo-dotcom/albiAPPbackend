@@ -17,7 +17,7 @@ app.use(morgan("dev"));
 connectDB();
 // Middleware
 const allowedOrigins = [
-//   "http://localhost:5173", // Standard Vite frontend port
+   "http://localhost:5173", // Standard Vite frontend port
   "https://finconmanager.netlify.app",
 ];
 

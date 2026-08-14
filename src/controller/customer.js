@@ -1,16 +1,44 @@
+import mongoose from "mongoose";
 import Customer from "../models/customer.js";
 import Sale from "../models/sale.js";
 import { Product } from "../models/product.js";
 import ExcelJS from "exceljs/dist/exceljs.js";
 import PaymentLedger from "../models/paymentLedger.js";
+import {Expense} from "../models/Expense.js";
+
+/**
+ * Helper to safely extract and validate authorization context
+ */
+const getAuthContext = (req) => {
+  const companyId = req.user?.companyId;
+  const inputer = req.user?._id || req.user?.id;
+
+  if (!companyId || !inputer) return null;
+
+  return {
+    companyId,
+    inputer,
+    companyObjId: mongoose.Types.ObjectId.isValid(companyId)
+      ? new mongoose.Types.ObjectId(companyId)
+      : companyId,
+  };
+};
 
 /**
  * 1. POST /api/sales/sync
  * Syncs offline/bulk transactions: Creates/Updates Customer and saves individual Sales
  */
-
 export const syncCustomers = async (req, res) => {
   try {
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId, inputer } = auth;
+
     const { customers } = req.body;
 
     if (!customers || !Array.isArray(customers) || customers.length === 0) {
@@ -29,8 +57,11 @@ export const syncCustomers = async (req, res) => {
       });
     });
 
-    // Fetch actual products from MongoDB
-    const dbProducts = await Product.find({ _id: { $in: productIds } });
+    // Fetch actual products from MongoDB scoped by companyId
+    const dbProducts = await Product.find({
+      _id: { $in: productIds },
+      companyId,
+    });
     const productMap = new Map(dbProducts.map((p) => [p._id.toString(), p]));
 
     const stockUpdates = [];
@@ -45,7 +76,7 @@ export const syncCustomers = async (req, res) => {
       const saleItems = [];
       const customerItems = [];
 
-      // 2. Calculate true total using the correct Product Schema field (unitPrice)
+      // 2. Calculate true total using the correct Product Schema field
       for (const item of c.items || []) {
         const productId = item.id || item.product || item._id;
         const dbProduct = productMap.get(productId?.toString());
@@ -56,14 +87,13 @@ export const syncCustomers = async (req, res) => {
 
         const qty = parseInt(item.qty, 10) || 1;
 
-        // FIXED: Pull directly from dbProduct.unitPrice (Product Schema)
         const unitPrice = Number(dbProduct.unitPrice ?? item.unitPrice ?? 0);
         const unitCost = Number(dbProduct.costPrice ?? item.unitCost ?? 0);
 
         const itemSubtotal = unitPrice * qty;
         calculatedTotalAmount += itemSubtotal;
 
-        // Structure item for Sale schema (contains unitCost)
+        // Structure item for Sale schema
         saleItems.push({
           product: dbProduct._id,
           name: dbProduct.name || item.name,
@@ -80,10 +110,10 @@ export const syncCustomers = async (req, res) => {
           unitPrice,
         });
 
-        // Prepare bulk update for inventory stock reduction
+        // Prepare bulk update for inventory stock reduction scoped by companyId
         stockUpdates.push({
           updateOne: {
-            filter: { _id: dbProduct._id },
+            filter: { _id: dbProduct._id, companyId },
             update: { $inc: { stockQuantity: -Math.abs(qty) } },
           },
         });
@@ -92,13 +122,12 @@ export const syncCustomers = async (req, res) => {
       // 3. Extract amount paid today sent from the frontend
       const amountPaidToday = parseFloat(c.amountSpent ?? c.amountPaid ?? 0);
 
-      // Calculate debt (amountOwe)
+      // Calculate debt
       const amountOwe =
         calculatedTotalAmount > amountPaidToday
           ? calculatedTotalAmount - amountPaidToday
           : 0;
 
-      // FIXED: Match enum ["Paid", "Partial", "Unpaid"] on Sale schema
       let paymentStatus = "Paid";
       if (amountOwe > 0 && amountPaidToday > 0) {
         paymentStatus = "Partial";
@@ -106,12 +135,17 @@ export const syncCustomers = async (req, res) => {
         paymentStatus = "Unpaid";
       }
 
-      // 4. Find or Create/Update Customer Document
+      // 4. Find or Create/Update Customer Document scoped by companyId
       const phoneTrimmed = c.phone.trim();
-      let customerRecord = await Customer.findOne({ phone: phoneTrimmed });
+      let customerRecord = await Customer.findOne({
+        phone: phoneTrimmed,
+        companyId,
+      });
 
       if (!customerRecord) {
         customerRecord = await Customer.create({
+          companyId,
+          inputer,
           fullName: c.fullName.trim(),
           phone: phoneTrimmed,
           email: c.email ? c.email.trim() : "",
@@ -119,7 +153,7 @@ export const syncCustomers = async (req, res) => {
           customerType: c.customerType || "Walk-in",
           paymentMethod: c.paymentMethod || "Cash",
           totalAmount: calculatedTotalAmount,
-          amountSpent: amountPaidToday, // Customer Schema uses amountSpent
+          amountSpent: amountPaidToday,
           amountOwe: amountOwe,
           notes: c.notes ? c.notes.trim() : "",
           items: customerItems,
@@ -133,8 +167,10 @@ export const syncCustomers = async (req, res) => {
         await customerRecord.save();
       }
 
-      // 5. Create Sale Document
+      // 5. Create Sale Document with companyId and inputer
       const newSale = await Sale.create({
+        companyId,
+        inputer,
         customer: customerRecord._id,
         items: saleItems,
         totalAmount: calculatedTotalAmount,
@@ -166,12 +202,22 @@ export const syncCustomers = async (req, res) => {
     });
   }
 };
+
 /**
  * 2. GET /api/sales
- * Paginated sales ledger querying the Sale model directly
+ * Paginated sales ledger querying the Sale model directly scoped by companyId
  */
 export const getSalesLedger = async (req, res) => {
   try {
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId, companyObjId } = auth;
+
     const page = parseInt(req.query.page, 10) || 1;
     const limit = parseInt(req.query.limit, 10) || 10;
     const search = req.query.search ? req.query.search.trim() : "";
@@ -180,7 +226,7 @@ export const getSalesLedger = async (req, res) => {
     const { startDate, endDate } = req.query;
 
     const skip = (page - 1) * limit;
-    const query = {};
+    const query = { companyId };
 
     // 1. Debt Status Filter
     if (debtStatus === "OWING") {
@@ -210,6 +256,7 @@ export const getSalesLedger = async (req, res) => {
     // 4. Search Filter
     if (search) {
       const matchingCustomers = await Customer.find({
+        companyId,
         $or: [
           { fullName: { $regex: search, $options: "i" } },
           { phone: { $regex: search, $options: "i" } },
@@ -219,6 +266,9 @@ export const getSalesLedger = async (req, res) => {
       const customerIds = matchingCustomers.map((c) => c._id);
       query.customer = { $in: customerIds };
     }
+
+    // Prepare aggregation match query with ObjectId companyId
+    const aggregateQuery = { ...query, companyId: companyObjId };
 
     // 5. Execute DB Queries in Parallel
     const [sales, totalItems, aggregateMetrics] = await Promise.all([
@@ -232,7 +282,7 @@ export const getSalesLedger = async (req, res) => {
       Sale.countDocuments(query),
 
       Sale.aggregate([
-        { $match: query },
+        { $match: aggregateQuery },
         {
           $group: {
             _id: null,
@@ -271,14 +321,23 @@ export const getSalesLedger = async (req, res) => {
 
 /**
  * 3. GET /api/sales/export
- * Generates Excel report from Sale collection
+ * Generates Excel report from Sale collection scoped by companyId
  */
 export const exportSalesToExcel = async (req, res) => {
   try {
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId } = auth;
+
     const debtStatus = req.query.status || "ALL";
     const paymentMethod = req.query.paymentMethod || "ALL";
 
-    const query = {};
+    const query = { companyId };
     if (debtStatus === "OWING") query.amountOwe = { $gt: 0 };
     if (debtStatus === "PAID") query.amountOwe = { $lte: 0 };
     if (paymentMethod !== "ALL") query.paymentMethod = paymentMethod;
@@ -351,13 +410,21 @@ export const exportSalesToExcel = async (req, res) => {
 
 /**
  * 4. GET /api/sales/:id/receipt
- * Retrieves single Sale document by Sale ID
+ * Retrieves single Sale document by Sale ID scoped by companyId
  */
 export const getSaleReceipt = async (req, res) => {
   try {
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId } = auth;
     const { id } = req.params;
 
-    const saleRecord = await Sale.findById(id)
+    const saleRecord = await Sale.findOne({ _id: id, companyId })
       .populate("customer", "fullName phone email address customerType")
       .populate("items.product", "name price category description");
 
@@ -378,11 +445,19 @@ export const getSaleReceipt = async (req, res) => {
 
 /**
  * 5. POST /api/sales/:id/pay-debt
- * Pays debt against a specific Sale transaction ID
+ * Pays debt against a specific Sale transaction ID and updates Customer debt balance
  */
 export const payDebt = async (req, res) => {
   try {
-    const { id } = req.params; // Sale ID
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId, inputer } = auth;
+    const { id } = req.params;
     const { paymentAmount, note } = req.body;
 
     const parsedAmount = parseFloat(paymentAmount);
@@ -392,7 +467,9 @@ export const payDebt = async (req, res) => {
         .json({ success: false, message: "Invalid payment amount" });
     }
 
-    const saleRecord = await Sale.findById(id).populate("customer");
+    const saleRecord = await Sale.findOne({ _id: id, companyId }).populate(
+      "customer",
+    );
     if (!saleRecord) {
       return res
         .status(404)
@@ -412,14 +489,30 @@ export const payDebt = async (req, res) => {
       });
     }
 
-    // Reduce debt on Sale
+    // 1. Reduce debt on Sale
     saleRecord.amountPaid += parsedAmount;
     saleRecord.amountOwe = Math.max(0, saleRecord.amountOwe - parsedAmount);
     await saleRecord.save();
 
-    // Log in Payment Ledger linked to Customer
+    // 2. Reduce debt on Customer record to maintain consistency across models
+    const customerId = saleRecord.customer?._id || saleRecord.customer;
+    if (customerId) {
+      await Customer.updateOne(
+        { _id: customerId, companyId },
+        {
+          $inc: {
+            amountSpent: parsedAmount,
+            amountOwe: -parsedAmount,
+          },
+        },
+      );
+    }
+
+    // 3. Log in Payment Ledger with companyId and inputer
     const ledgerEntry = await PaymentLedger.create({
-      customerId: saleRecord.customer._id || saleRecord.customer,
+      companyId,
+      inputer,
+      customerId,
       amountPaid: parsedAmount,
       note: note || `Debt payment for Sale #${saleRecord._id}`,
       paymentDate: new Date(),
@@ -444,11 +537,20 @@ export const payDebt = async (req, res) => {
 
 /**
  * 6. GET /api/sales/debtors
- * Gets all unpaid sales transactions
+ * Gets all unpaid sales transactions scoped by companyId
  */
 export const getDebtors = async (req, res) => {
   try {
-    const debtors = await Sale.find({ amountOwe: { $gt: 0 } })
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId } = auth;
+
+    const debtors = await Sale.find({ companyId, amountOwe: { $gt: 0 } })
       .populate("customer", "fullName phone customerType")
       .sort({ amountOwe: -1 });
 
@@ -464,12 +566,21 @@ export const getDebtors = async (req, res) => {
 
 /**
  * 7. GET /api/customer or /api/sales/customers
- * Returns directory of all registered customers with real-time aggregated sales totals
+ * Returns directory of registered customers with aggregated sales totals scoped by companyId
  */
 export const getAllCustomersSummary = async (req, res) => {
   try {
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId, companyObjId } = auth;
+
     const search = req.query.search ? req.query.search.trim() : "";
-    const matchStage = {};
+    const matchStage = { companyId: companyObjId };
 
     if (search) {
       matchStage.$or = [
@@ -482,9 +593,20 @@ export const getAllCustomersSummary = async (req, res) => {
       { $match: matchStage },
       {
         $lookup: {
-          from: "sales", // MongoDB collection name for Sale model
-          localField: "_id",
-          foreignField: "customer",
+          from: "sales",
+          let: { customerId: "$_id" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ["$customer", "$$customerId"] },
+                    { $eq: ["$companyId", companyObjId] },
+                  ],
+                },
+              },
+            },
+          ],
           as: "salesHistory",
         },
       },
@@ -524,13 +646,21 @@ export const getAllCustomersSummary = async (req, res) => {
 
 /**
  * 8. GET /api/customer/:id/history or /api/sales/customer/:id/history
- * Returns the full itemized purchase statement ("Spool History") for a single customer
+ * Returns the full itemized purchase statement for a single customer scoped by companyId
  */
 export const getCustomerShoppingHistory = async (req, res) => {
   try {
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId } = auth;
     const { id } = req.params;
 
-    const customerRecord = await Customer.findById(id);
+    const customerRecord = await Customer.findOne({ _id: id, companyId });
     if (!customerRecord) {
       return res.status(404).json({
         success: false,
@@ -538,12 +668,11 @@ export const getCustomerShoppingHistory = async (req, res) => {
       });
     }
 
-    // Retrieve all sales linked to this customer
-    const salesHistory = await Sale.find({ customer: id })
+    // Retrieve all sales linked to this customer and companyId
+    const salesHistory = await Sale.find({ customer: id, companyId })
       .populate("items.product", "name price category")
       .sort({ createdAt: -1 });
 
-    // Calculate aggregated lifetime statistics
     const summary = salesHistory.reduce(
       (acc, sale) => {
         acc.totalOrders += 1;
@@ -572,20 +701,19 @@ export const getCustomerShoppingHistory = async (req, res) => {
 };
 
 /**
- * GET /api/financial/overview
- * Returns product performance, debtor credit accounts, and expense totals
- */
-/**
- * GET /api/financial/overview
- * Returns product performance, debtor credit accounts with last payment details, and expense totals
- */
-/**
- * GET /api/financial/overview
- * Returns product performance, debtor credit accounts (debt calculated live from Sales),
- * expense totals, and last PaymentLedger transactions.
+ * 9. GET /api/financial/overview
+ * Returns product performance, debtor credit accounts, expense totals scoped by companyId
  */
 export const getFinancialOverview = async (req, res) => {
   try {
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId, companyObjId } = auth;
     const { timeframe = "This Month" } = req.query;
 
     // 1. Calculate Date Range
@@ -599,15 +727,14 @@ export const getFinancialOverview = async (req, res) => {
       startDate.setDate(startDate.getDate() - dayOfWeek);
       startDate.setHours(0, 0, 0, 0);
     } else {
-      // Default: "This Month"
       startDate = new Date(now.getFullYear(), now.getMonth(), 1);
     }
 
     const dateQuery = { $gte: startDate, $lte: now };
 
-    // 2. Aggregate Product Performance from Sales matching date range
+    // 2. Aggregate Product Performance from Sales matching companyId and date range
     const productSales = await Sale.aggregate([
-      { $match: { createdAt: dateQuery } },
+      { $match: { companyId: companyObjId, createdAt: dateQuery } },
       { $unwind: "$items" },
       {
         $group: {
@@ -635,28 +762,26 @@ export const getFinancialOverview = async (req, res) => {
       },
     ]);
 
-    // 3. Fetch Operational Expenses for timeframe (if Expense model exists)
+    // 3. Fetch Operational Expenses for timeframe
     let operationalExpenses = 0;
     try {
       const expenseAggregation = await Expense.aggregate([
-        { $match: { createdAt: dateQuery } },
+        { $match: { companyId: companyObjId, createdAt: dateQuery } },
         { $group: { _id: null, total: { $sum: "$amount" } } },
       ]);
       operationalExpenses = expenseAggregation[0]?.total || 0;
     } catch {
-      // Gracefully handle if Expense collection is not created yet
       operationalExpenses = 0;
     }
 
-    // 4. Aggregate Live Customer Debt AND collect specific unpaid sales
+    // 4. Aggregate Live Customer Debt scoped by companyId
     const activeDebtors = await Sale.aggregate([
-      { $match: { amountOwe: { $gt: 0 } } },
+      { $match: { companyId: companyObjId, amountOwe: { $gt: 0 } } },
       {
         $group: {
           _id: "$customer",
           liveTotalOwed: { $sum: "$amountOwe" },
           liveTotalPaid: { $sum: "$amountPaid" },
-          // Collect all open sale IDs and amounts for this customer
           unpaidSales: {
             $push: {
               saleId: "$_id",
@@ -670,9 +795,20 @@ export const getFinancialOverview = async (req, res) => {
       },
       {
         $lookup: {
-          from: "customers", // MongoDB collection name for Customer
-          localField: "_id",
-          foreignField: "_id",
+          from: "customers",
+          let: { custId: "$_id" },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $and: [
+                    { $eq: ["$_id", "$$custId"] },
+                    { $eq: ["$companyId", companyObjId] },
+                  ],
+                },
+              },
+            },
+          ],
           as: "customerDetails",
         },
       },
@@ -680,11 +816,11 @@ export const getFinancialOverview = async (req, res) => {
       { $sort: { liveTotalOwed: -1 } },
     ]);
 
-    // 5. Fetch the most recent PaymentLedger entry for each debtor
+    // 5. Fetch the most recent PaymentLedger entry for each debtor scoped by companyId
     const debtorIds = activeDebtors.map((d) => d._id);
 
     const latestPayments = await PaymentLedger.aggregate([
-      { $match: { customerId: { $in: debtorIds } } },
+      { $match: { companyId: companyObjId, customerId: { $in: debtorIds } } },
       { $sort: { paymentDate: -1, createdAt: -1 } },
       {
         $group: {
@@ -696,13 +832,12 @@ export const getFinancialOverview = async (req, res) => {
       },
     ]);
 
-    // Map payment ledger records for fast O(1) lookup
     const paymentMap = {};
     latestPayments.forEach((p) => {
       paymentMap[p._id.toString()] = p;
     });
 
-    // 6. Combine Customer Details, Live Sales Debt, Unpaid Sales, and Ledger Info
+    // 6. Combine Customer Details, Debt, Unpaid Sales, and Ledger Info
     const creditAccounts = activeDebtors.map((debtor) => {
       const cust = debtor.customerDetails;
       const lastPayment = paymentMap[debtor._id.toString()];
@@ -711,9 +846,9 @@ export const getFinancialOverview = async (req, res) => {
         id: cust._id,
         customerName: cust.fullName,
         phone: cust.phone,
-        totalOwed: debtor.liveTotalOwed, // Dynamically computed live sum of Sale.amountOwe
-        amountPaid: debtor.liveTotalPaid, // Live sum of Sale.amountPaid
-        unpaidSales: debtor.unpaidSales || [], // <--- List of open sales with saleId for payment dropdown
+        totalOwed: debtor.liveTotalOwed,
+        amountPaid: debtor.liveTotalPaid,
+        unpaidSales: debtor.unpaidSales || [],
         reminderNote: cust.notes || "",
         lastPaymentDate: lastPayment ? lastPayment.lastPaymentDate : null,
         lastPaymentAmount: lastPayment ? lastPayment.lastPaymentAmount : 0,

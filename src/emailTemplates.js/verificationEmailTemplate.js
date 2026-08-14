@@ -27,7 +27,7 @@ export const verificationTemplate = (
               <!-- Header / Logo -->
               <tr>
                 <td style="padding-bottom:24px;border-bottom:1px solid #f1f5f9;">
-                  <span style="font-size:18px;font-weight:700;color:#0f172a;">cloudPlaza</span>
+                  <span style="font-size:18px;font-weight:700;color:#0f172a;">FINCMANAGER</span>
                 </td>
               </tr>
               

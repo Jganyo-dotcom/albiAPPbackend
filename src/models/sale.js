@@ -25,7 +25,17 @@ const saleSchema = new mongoose.Schema(
       ref: "Customer", // Connects this sale to a document in the Customer collection
       required: [true, "Customer reference is required"],
     },
-
+    inputer: {
+      type: mongoose.Schema.Types.ObjectId, // Fixed path to ObjectId
+      required: true,
+      ref: "User", // Fixed: Model names must be passed as a string
+    },
+    companyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Company",
+      required: true,
+      index: true, // Speeds up queries across all store sales
+    },
     // Optional receipt/invoice identifier
     invoiceNumber: {
       type: String,

@@ -9,6 +9,17 @@ const productSchema = new mongoose.Schema(
       trim: true,
       uppercase: true, // Stores as PRD-101 / SKU-5350
     },
+    inputer: {
+      type: mongoose.Schema.Types.ObjectId, // Fixed path to ObjectId
+      required: true,
+      ref: "User", // Fixed: Model names must be passed as a string
+    },
+    companyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Company",
+      required: true,
+      index: true, // Speeds up queries across all store sales
+    },
     name: {
       type: String,
       required: [true, "Product name is required"],

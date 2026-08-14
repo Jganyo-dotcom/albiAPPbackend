@@ -1,6 +1,25 @@
+import mongoose from "mongoose";
 import { Product } from "../models/product.js";
 import { Expense } from "../models/Expense.js";
-import Sale from "../models/sale.js"; // Imported to include Sales in Dashboard Metrics
+import Sale from "../models/sale.js";
+
+/**
+ * Helper to safely extract and validate authorization context
+ */
+const getAuthContext = (req) => {
+  const companyId = req.user?.companyId;
+  const inputer = req.user?._id || req.user?.id;
+
+  if (!companyId || !inputer) return null;
+
+  return {
+    companyId,
+    inputer,
+    companyObjId: mongoose.Types.ObjectId.isValid(companyId)
+      ? new mongoose.Types.ObjectId(companyId)
+      : companyId,
+  };
+};
 
 // Helper function to format standard time (e.g. 05:21 PM)
 const getCurrentStandardTime = () => {
@@ -21,6 +40,15 @@ const getCurrentFormattedDate = () => {
 // ==========================================
 export const getDashboardMetrics = async (req, res) => {
   try {
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId, companyObjId } = auth;
+
     const [
       totalProducts,
       lowStockCount,
@@ -28,16 +56,18 @@ export const getDashboardMetrics = async (req, res) => {
       expensesValueResult,
       salesValueResult,
     ] = await Promise.all([
-      // Total Products Count
-      Product.countDocuments(),
+      // Total Products Count scoped by company
+      Product.countDocuments({ companyId }),
 
-      // Low Stock Items Count
+      // Low Stock Items Count scoped by company
       Product.countDocuments({
+        companyId,
         $expr: { $lte: ["$stockQuantity", "$lowStockThreshold"] },
       }),
 
       // Total Inventory Retail Value Calculation: Sum(stockQuantity * unitPrice)
       Product.aggregate([
+        { $match: { companyId: companyObjId } },
         {
           $group: {
             _id: null,
@@ -48,8 +78,9 @@ export const getDashboardMetrics = async (req, res) => {
         },
       ]),
 
-      // Total Expenses Calculation: Sum(amount)
+      // Total Expenses Calculation: Sum(amount) scoped by company
       Expense.aggregate([
+        { $match: { companyId: companyObjId } },
         {
           $group: {
             _id: null,
@@ -58,8 +89,9 @@ export const getDashboardMetrics = async (req, res) => {
         },
       ]),
 
-      // Total Revenue Calculation from Sales
+      // Total Revenue Calculation from Sales scoped by company
       Sale.aggregate([
+        { $match: { companyId: companyObjId } },
         {
           $group: {
             _id: null,
@@ -96,7 +128,16 @@ export const getDashboardMetrics = async (req, res) => {
 // Get All Products + Calculate Margin per item dynamically
 export const getProducts = async (req, res) => {
   try {
-    const products = await Product.find().sort({ createdAt: -1 });
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId } = auth;
+
+    const products = await Product.find({ companyId }).sort({ createdAt: -1 });
 
     const formattedProducts = products.map((product) => {
       const unitPrice = product.unitPrice || 0;
@@ -126,6 +167,15 @@ export const getProducts = async (req, res) => {
 // Add New Product + Auto Generate Product Code (PRD-101)
 export const createProduct = async (req, res) => {
   try {
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId, inputer } = auth;
+
     const rawItems = Array.isArray(req.body.items)
       ? req.body.items
       : [req.body];
@@ -137,13 +187,15 @@ export const createProduct = async (req, res) => {
       });
     }
 
-    const existingCount = await Product.countDocuments();
+    const existingCount = await Product.countDocuments({ companyId });
 
     const preparedItems = rawItems.map((item, index) => {
       const generatedCode = `PRD-${101 + existingCount + index}`;
       const finalCode = item.sku || item.productCode || generatedCode;
 
       return {
+        companyId,
+        inputer,
         productCode: finalCode,
         name: item.name,
         category: item.category,
@@ -179,6 +231,15 @@ export const createProduct = async (req, res) => {
 // Restock Product (Increment Stock)
 export const restockProduct = async (req, res) => {
   try {
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId } = auth;
+
     const { productId } = req.params;
     const { addedQuantity } = req.body;
 
@@ -190,10 +251,10 @@ export const restockProduct = async (req, res) => {
       });
     }
 
-    const updatedProduct = await Product.findByIdAndUpdate(
-      productId,
+    const updatedProduct = await Product.findOneAndUpdate(
+      { _id: productId, companyId },
       { $inc: { stockQuantity: qtyToAdd } },
-      { new: true },
+      { returnDocument: "after" },
     );
 
     if (!updatedProduct) {
@@ -215,6 +276,15 @@ export const restockProduct = async (req, res) => {
 // Update Product Retail & Cost Prices
 export const updateProductPrices = async (req, res) => {
   try {
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId } = auth;
+
     const { productId } = req.params;
     const {
       name,
@@ -236,10 +306,10 @@ export const updateProductPrices = async (req, res) => {
     if (lowStockThreshold !== undefined)
       updateFields.lowStockThreshold = parseInt(lowStockThreshold, 10);
 
-    const updatedProduct = await Product.findByIdAndUpdate(
-      productId,
+    const updatedProduct = await Product.findOneAndUpdate(
+      { _id: productId, companyId },
       updateFields,
-      { new: true, runValidators: true },
+      { returnDocument:"after", runValidators: true },
     );
 
     if (!updatedProduct) {
@@ -268,7 +338,16 @@ export const updateProductPrices = async (req, res) => {
 // Get All Expenses
 export const getExpenses = async (req, res) => {
   try {
-    const expenses = await Expense.find().sort({ createdAt: -1 });
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId } = auth;
+
+    const expenses = await Expense.find({ companyId }).sort({ createdAt: -1 });
     return res.status(200).json({ success: true, expenses });
   } catch (error) {
     return res.status(500).json({ success: false, message: error.message });
@@ -278,17 +357,26 @@ export const getExpenses = async (req, res) => {
 // Log New Operational Expense
 export const createExpense = async (req, res) => {
   try {
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId, inputer } = auth;
+
     const { category, amount, purpose, paymentMethod } = req.body;
 
     let expenseCode = req.body.expenseCode;
     if (!expenseCode) {
-      const count = await Expense.countDocuments();
+      const count = await Expense.countDocuments({ companyId });
       expenseCode = `EXP-${301 + count}`;
     }
 
-    const userId = req.user?.id || req.user?._id || null;
-
     const newExpense = await Expense.create({
+      companyId,
+      inputer,
       expenseCode,
       date: req.body.date || getCurrentFormattedDate(),
       time: req.body.time || getCurrentStandardTime(),
@@ -296,7 +384,7 @@ export const createExpense = async (req, res) => {
       amount: parseFloat(amount),
       purpose,
       paymentMethod: paymentMethod || "Cash",
-      loggedBy: userId,
+      loggedBy: inputer,
     });
 
     return res.status(201).json({
@@ -312,9 +400,18 @@ export const createExpense = async (req, res) => {
 // Reverse/Delete an expense and recalculate total expenses
 export const reverseExpense = async (req, res) => {
   try {
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company & inputer context.",
+      });
+    }
+    const { companyId, companyObjId } = auth;
+
     const { expenseId } = req.params;
 
-    const expense = await Expense.findById(expenseId);
+    const expense = await Expense.findOne({ _id: expenseId, companyId });
     if (!expense) {
       return res.status(404).json({
         success: false,
@@ -324,9 +421,10 @@ export const reverseExpense = async (req, res) => {
 
     const reversedAmount = expense.amount || 0;
 
-    await Expense.findByIdAndDelete(expenseId);
+    await Expense.findOneAndDelete({ _id: expenseId, companyId });
 
     const aggregateResult = await Expense.aggregate([
+      { $match: { companyId: companyObjId } },
       {
         $group: {
           _id: null,
