@@ -18,7 +18,7 @@ connectDB();
 // Middleware
 const allowedOrigins = [
   "http://localhost:5173", // Standard Vite frontend port
-  "https://ecommercebackend-5b08.onrender.com",
+  "https://albiappbackend.onrender.com",
 ];
 
 app.use(
