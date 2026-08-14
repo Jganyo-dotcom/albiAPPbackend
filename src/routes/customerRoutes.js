@@ -7,6 +7,7 @@ import {
   syncCustomers,
   getDebtors,
   getAllCustomersSummary,
+  getFinancialOverview,
 } from "../controller/customer.js";
 import { protect } from "../middleware/auth.js";
 
@@ -29,7 +30,8 @@ router.post("/pay-debt", payDebt);
 // ====================================================
 router.get("/export", exportSalesToExcel);
 router.get("/debtors", getDebtors);
-router.get("/directory",getAllCustomersSummary);
+router.get("/directory", getAllCustomersSummary);
+router.get("/financial/overview", getFinancialOverview);
 
 // ====================================================
 // 3. ROOT BASE ROUTE

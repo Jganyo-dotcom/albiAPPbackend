@@ -570,3 +570,171 @@ export const getCustomerShoppingHistory = async (req, res) => {
     });
   }
 };
+
+/**
+ * GET /api/financial/overview
+ * Returns product performance, debtor credit accounts, and expense totals
+ */
+/**
+ * GET /api/financial/overview
+ * Returns product performance, debtor credit accounts with last payment details, and expense totals
+ */
+/**
+ * GET /api/financial/overview
+ * Returns product performance, debtor credit accounts (debt calculated live from Sales),
+ * expense totals, and last PaymentLedger transactions.
+ */
+export const getFinancialOverview = async (req, res) => {
+  try {
+    const { timeframe = "This Month" } = req.query;
+
+    // 1. Calculate Date Range
+    const now = new Date();
+    let startDate = new Date();
+
+    if (timeframe === "Today") {
+      startDate.setHours(0, 0, 0, 0);
+    } else if (timeframe === "This Week") {
+      const dayOfWeek = startDate.getDay();
+      startDate.setDate(startDate.getDate() - dayOfWeek);
+      startDate.setHours(0, 0, 0, 0);
+    } else {
+      // Default: "This Month"
+      startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+    }
+
+    const dateQuery = { $gte: startDate, $lte: now };
+
+    // 2. Aggregate Product Performance from Sales matching date range
+    const productSales = await Sale.aggregate([
+      { $match: { createdAt: dateQuery } },
+      { $unwind: "$items" },
+      {
+        $group: {
+          _id: "$items.product",
+          name: { $first: "$items.name" },
+          unitsSold: { $sum: "$items.qty" },
+          unitPrice: { $first: "$items.unitPrice" },
+          unitCost: { $first: "$items.unitCost" },
+          totalRevenue: {
+            $sum: { $multiply: ["$items.unitPrice", "$items.qty"] },
+          },
+          totalCost: { $sum: { $multiply: ["$items.unitCost", "$items.qty"] } },
+        },
+      },
+      {
+        $project: {
+          id: "$_id",
+          name: 1,
+          unitsSold: 1,
+          unitPrice: 1,
+          unitCost: 1,
+          totalRevenue: 1,
+          profit: { $subtract: ["$totalRevenue", "$totalCost"] },
+        },
+      },
+    ]);
+
+    // 3. Fetch Operational Expenses for timeframe (if Expense model exists)
+    let operationalExpenses = 0;
+    try {
+      const expenseAggregation = await Expense.aggregate([
+        { $match: { createdAt: dateQuery } },
+        { $group: { _id: null, total: { $sum: "$amount" } } },
+      ]);
+      operationalExpenses = expenseAggregation[0]?.total || 0;
+    } catch {
+      // Gracefully handle if Expense collection is not created yet
+      operationalExpenses = 0;
+    }
+
+    // 4. Aggregate Live Customer Debt AND collect specific unpaid sales
+    const activeDebtors = await Sale.aggregate([
+      { $match: { amountOwe: { $gt: 0 } } },
+      {
+        $group: {
+          _id: "$customer",
+          liveTotalOwed: { $sum: "$amountOwe" },
+          liveTotalPaid: { $sum: "$amountPaid" },
+          // Collect all open sale IDs and amounts for this customer
+          unpaidSales: {
+            $push: {
+              saleId: "$_id",
+              amountOwe: "$amountOwe",
+              amountPaid: "$amountPaid",
+              totalAmount: "$totalAmount",
+              createdAt: "$createdAt",
+            },
+          },
+        },
+      },
+      {
+        $lookup: {
+          from: "customers", // MongoDB collection name for Customer
+          localField: "_id",
+          foreignField: "_id",
+          as: "customerDetails",
+        },
+      },
+      { $unwind: "$customerDetails" },
+      { $sort: { liveTotalOwed: -1 } },
+    ]);
+
+    // 5. Fetch the most recent PaymentLedger entry for each debtor
+    const debtorIds = activeDebtors.map((d) => d._id);
+
+    const latestPayments = await PaymentLedger.aggregate([
+      { $match: { customerId: { $in: debtorIds } } },
+      { $sort: { paymentDate: -1, createdAt: -1 } },
+      {
+        $group: {
+          _id: "$customerId",
+          lastPaymentDate: { $first: "$paymentDate" },
+          lastPaymentAmount: { $first: "$amountPaid" },
+          lastPaymentNote: { $first: "$note" },
+        },
+      },
+    ]);
+
+    // Map payment ledger records for fast O(1) lookup
+    const paymentMap = {};
+    latestPayments.forEach((p) => {
+      paymentMap[p._id.toString()] = p;
+    });
+
+    // 6. Combine Customer Details, Live Sales Debt, Unpaid Sales, and Ledger Info
+    const creditAccounts = activeDebtors.map((debtor) => {
+      const cust = debtor.customerDetails;
+      const lastPayment = paymentMap[debtor._id.toString()];
+
+      return {
+        id: cust._id,
+        customerName: cust.fullName,
+        phone: cust.phone,
+        totalOwed: debtor.liveTotalOwed, // Dynamically computed live sum of Sale.amountOwe
+        amountPaid: debtor.liveTotalPaid, // Live sum of Sale.amountPaid
+        unpaidSales: debtor.unpaidSales || [], // <--- List of open sales with saleId for payment dropdown
+        reminderNote: cust.notes || "",
+        lastPaymentDate: lastPayment ? lastPayment.lastPaymentDate : null,
+        lastPaymentAmount: lastPayment ? lastPayment.lastPaymentAmount : 0,
+        lastPaymentNote: lastPayment ? lastPayment.lastPaymentNote : "",
+        lastUpdated: cust.updatedAt,
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      timeframe,
+      products: productSales,
+      creditAccounts,
+      operationalExpenses,
+    });
+  } catch (error) {
+    console.error("Error fetching financial overview:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch financial overview metrics.",
+      error: error.message,
+    });
+  }
+};
