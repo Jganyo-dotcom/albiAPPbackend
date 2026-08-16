@@ -56,6 +56,10 @@ const saleSchema = new mongoose.Schema(
       required: [true, "Amount paid today is required"],
       default: 0,
     },
+    totalCredit: {
+      type: Number,
+      default: 0, // Automatically calculated in pre-save hook
+    },
     amountOwe: {
       type: Number,
       default: 0, // Automatically calculated in pre-save hook

@@ -4,7 +4,7 @@ import Sale from "../models/sale.js";
 import { Product } from "../models/product.js";
 import ExcelJS from "exceljs/dist/exceljs.js";
 import PaymentLedger from "../models/paymentLedger.js";
-import {Expense} from "../models/Expense.js";
+import { Expense } from "../models/Expense.js";
 
 /**
  * Helper to safely extract and validate authorization context
@@ -176,6 +176,7 @@ export const syncCustomers = async (req, res) => {
         totalAmount: calculatedTotalAmount,
         amountPaid: amountPaidToday,
         amountOwe: amountOwe,
+        totalCredit: amountOwe,
         paymentMethod: c.paymentMethod || "Cash",
         paymentStatus: paymentStatus,
         notes: c.notes ? c.notes.trim() : "",
@@ -704,171 +705,233 @@ export const getCustomerShoppingHistory = async (req, res) => {
  * 9. GET /api/financial/overview
  * Returns product performance, debtor credit accounts, expense totals scoped by companyId
  */
+
+// =========================================================================
+// 🛠️ HELPER 1: DATE RANGE BUILDER
+// Converts raw text dates from the frontend (e.g., "2026-08-01") into
+// standard JavaScript Date objects that MongoDB can query.
+// =========================================================================
+const getQueryDateRange = (startDate, endDate) => {
+  const now = new Date();
+
+  // If a start date exists, parse it. Otherwise, default to the 1st day of the current month.
+  const start = startDate
+    ? new Date(startDate)
+    : new Date(now.getFullYear(), now.getMonth(), 1);
+
+  // If an end date exists, parse it. Otherwise, default to right now.
+  const end = endDate ? new Date(endDate) : new Date();
+
+  // Set time to 23:59:59.999 PM so sales made on the last day are fully included.
+  end.setHours(23, 59, 59, 999);
+
+  // Return MongoDB query comparison object:
+  // $gte = Greater Than or Equal to start date
+  // $lte = Less Than or Equal to end date
+  return { $gte: start, $lte: end };
+};
+
+// =========================================================================
+// 🛠️ HELPER 2: CALCULATE PRODUCT REVENUE, COSTS & PROFIT MARGINS
+// Aggregates sales data to calculate total revenue, item cost, and profit.
+// =========================================================================
+const calculateProductMetrics = async (companyId, dateQuery) => {
+  return await Sale.aggregate([
+    // STAGE 1: Filter sales matching this company ID within the date range
+    { $match: { companyId, createdAt: dateQuery } },
+
+    // STAGE 2: Unpack the items array so each item inside a sale becomes its own document
+    { $unwind: "$items" },
+
+    // STAGE 3: Group records by Product ID to combine matching sold items
+    {
+      $group: {
+        _id: "$items.product", // Grouping key (Product ID)
+        name: { $first: "$items.name" }, // Store product name
+        category: { $first: "$items.category" }, // Store category
+        unitsSold: { $sum: "$items.qty" }, // Add up total quantity sold
+        unitPrice: { $first: "$items.unitPrice" }, // Record selling price
+        unitCost: { $first: "$items.unitCost" }, // Record purchase cost
+
+        // Total Revenue = (unit price * quantity) added up across all sales
+        totalRevenue: {
+          $sum: { $multiply: ["$items.unitPrice", "$items.qty"] },
+        },
+
+        // Total Cost = (cost price * quantity) added up across all sales
+        totalCost: { $sum: { $multiply: ["$items.unitCost", "$items.qty"] } },
+      },
+    },
+
+    // STAGE 4: Reshape fields and compute net profit per product
+    {
+      $project: {
+        id: "$_id",
+        name: 1,
+        category: 1,
+        unitsSold: 1,
+        unitPrice: 1,
+        unitCost: 1,
+        totalRevenue: 1,
+        totalCost: 1,
+        // Subtract total cost from total revenue to compute net item profit
+        profit: { $subtract: ["$totalRevenue", "$totalCost"] },
+      },
+    },
+  ]);
+};
+
+// =========================================================================
+// 🛠️ HELPER 3: CALCULATE OPERATIONAL OVERHEAD EXPENSES
+// Sums up overhead operational expenses (rent, utilities, salaries).
+// =========================================================================
+const calculateTotalExpenses = async (companyId, dateQuery) => {
+  try {
+    const expenseData = await Expense.aggregate([
+      // Filter expenses by company and date range
+      { $match: { companyId, createdAt: dateQuery } },
+      // Group all matching expenses together (_id: null) and sum up the 'amount' field
+      { $group: { _id: null, total: { $sum: "$amount" } } },
+    ]);
+    // Return total sum if expense records exist; otherwise return 0
+    return expenseData[0]?.total || 0;
+  } catch (err) {
+    return 0; // Fallback to 0 if an error occurs or no records exist
+  }
+};
+
+// =========================================================================
+// 🛠️ HELPER 4: FETCH ACTIVE DEBTORS
+// Finds sales with unpaid balances and joins customer profile data.
+// =========================================================================
+const fetchActiveDebtors = async (companyId) => {
+  return await Sale.aggregate([
+    // STAGE 1: Filter active unpaid sales
+    { $match: { companyId, amountOwe: { $gt: 0 } } },
+
+    // STAGE 2: Group sales by Customer and sum financial totals
+    {
+      $group: {
+        _id: "$customer",
+        liveTotalOwed: { $sum: "$amountOwe" },
+        liveTotalPaid: { $sum: "$amountPaid" },
+
+        // 💡 SUM TOTAL CREDIT (with fallback for old sales created before this field existed)
+        totalCredit: {
+          $sum: {
+            $ifNull: [
+              "$totalCredit",
+              { $add: ["$amountOwe", "$amountPaid"] }, // Fallback calculation for old sales
+            ],
+          },
+        },
+      },
+    },
+
+    // STAGE 3: Join customer details
+    {
+      $lookup: {
+        from: "customers",
+        localField: "_id",
+        foreignField: "_id",
+        as: "customerDetails",
+      },
+    },
+
+    { $unwind: "$customerDetails" },
+    { $sort: { liveTotalOwed: -1 } },
+  ]);
+};
+
+// =========================================================================
+// 🚀 MAIN CONTROLLER: GET FINANCIAL OVERVIEW
+// Handles the incoming HTTP request and orchestrates helper tasks.
+// =========================================================================
 export const getFinancialOverview = async (req, res) => {
   try {
+    // 1️⃣ AUTHENTICATION GATE
+    // Retrieve authentication context attached to request headers
     const auth = getAuthContext(req);
     if (!auth) {
       return res.status(401).json({
         success: false,
-        message: "Unauthorized: Missing company & inputer context.",
+        message: "Unauthorized: Missing company context.",
       });
     }
-    const { companyId, companyObjId } = auth;
-    const { timeframe = "This Month" } = req.query;
+    const { companyObjId } = auth;
 
-    // 1. Calculate Date Range
-    const now = new Date();
-    let startDate = new Date();
+    // 2️⃣ DATE QUERY CREATION
+    // Construct MongoDB date range query using helper 1
+    const dateQuery = getQueryDateRange(req.query.startDate, req.query.endDate);
 
-    if (timeframe === "Today") {
-      startDate.setHours(0, 0, 0, 0);
-    } else if (timeframe === "This Week") {
-      const dayOfWeek = startDate.getDay();
-      startDate.setDate(startDate.getDate() - dayOfWeek);
-      startDate.setHours(0, 0, 0, 0);
-    } else {
-      startDate = new Date(now.getFullYear(), now.getMonth(), 1);
-    }
-
-    const dateQuery = { $gte: startDate, $lte: now };
-
-    // 2. Aggregate Product Performance from Sales matching companyId and date range
-    const productSales = await Sale.aggregate([
-      { $match: { companyId: companyObjId, createdAt: dateQuery } },
-      { $unwind: "$items" },
-      {
-        $group: {
-          _id: "$items.product",
-          name: { $first: "$items.name" },
-          unitsSold: { $sum: "$items.qty" },
-          unitPrice: { $first: "$items.unitPrice" },
-          unitCost: { $first: "$items.unitCost" },
-          totalRevenue: {
-            $sum: { $multiply: ["$items.unitPrice", "$items.qty"] },
-          },
-          totalCost: { $sum: { $multiply: ["$items.unitCost", "$items.qty"] } },
-        },
-      },
-      {
-        $project: {
-          id: "$_id",
-          name: 1,
-          unitsSold: 1,
-          unitPrice: 1,
-          unitCost: 1,
-          totalRevenue: 1,
-          profit: { $subtract: ["$totalRevenue", "$totalCost"] },
-        },
-      },
-    ]);
-
-    // 3. Fetch Operational Expenses for timeframe
-    let operationalExpenses = 0;
-    try {
-      const expenseAggregation = await Expense.aggregate([
-        { $match: { companyId: companyObjId, createdAt: dateQuery } },
-        { $group: { _id: null, total: { $sum: "$amount" } } },
+    // 3️⃣ PARALLEL DATABASE EXECUTION
+    // Promise.all runs these 3 independent database jobs simultaneously to speed up API response time
+    const [productSales, operationalExpenses, activeDebtors] =
+      await Promise.all([
+        calculateProductMetrics(companyObjId, dateQuery),
+        calculateTotalExpenses(companyObjId, dateQuery),
+        fetchActiveDebtors(companyObjId),
       ]);
-      operationalExpenses = expenseAggregation[0]?.total || 0;
-    } catch {
-      operationalExpenses = 0;
-    }
 
-    // 4. Aggregate Live Customer Debt scoped by companyId
-    const activeDebtors = await Sale.aggregate([
-      { $match: { companyId: companyObjId, amountOwe: { $gt: 0 } } },
-      {
-        $group: {
-          _id: "$customer",
-          liveTotalOwed: { $sum: "$amountOwe" },
-          liveTotalPaid: { $sum: "$amountPaid" },
-          unpaidSales: {
-            $push: {
-              saleId: "$_id",
-              amountOwe: "$amountOwe",
-              amountPaid: "$amountPaid",
-              totalAmount: "$totalAmount",
-              createdAt: "$createdAt",
-            },
-          },
-        },
-      },
-      {
-        $lookup: {
-          from: "customers",
-          let: { custId: "$_id" },
-          pipeline: [
-            {
-              $match: {
-                $expr: {
-                  $and: [
-                    { $eq: ["$_id", "$$custId"] },
-                    { $eq: ["$companyId", companyObjId] },
-                  ],
-                },
-              },
-            },
-          ],
-          as: "customerDetails",
-        },
-      },
-      { $unwind: "$customerDetails" },
-      { $sort: { liveTotalOwed: -1 } },
-    ]);
+    // 4️⃣ FETCH PAYMENT LEDGER RECORDS
+    // Extract debtor customer IDs into a flat array: ['id1', 'id2', ...]
+    const debtorIds = activeDebtors.map((debtor) => debtor._id);
 
-    // 5. Fetch the most recent PaymentLedger entry for each debtor scoped by companyId
-    const debtorIds = activeDebtors.map((d) => d._id);
+    // Query PaymentLedger for previous partial payments made by these debtors
+    const allLedgerPayments = await PaymentLedger.find({
+      companyId: companyObjId,
+      customerId: { $in: debtorIds }, // $in checks if customerId matches any ID in debtorIds
+    }).sort({ paymentDate: -1, createdAt: -1 }); // Order newest payments first
 
-    const latestPayments = await PaymentLedger.aggregate([
-      { $match: { companyId: companyObjId, customerId: { $in: debtorIds } } },
-      { $sort: { paymentDate: -1, createdAt: -1 } },
-      {
-        $group: {
-          _id: "$customerId",
-          lastPaymentDate: { $first: "$paymentDate" },
-          lastPaymentAmount: { $first: "$amountPaid" },
-          lastPaymentNote: { $first: "$note" },
-        },
-      },
-    ]);
+    // 5️⃣ GROUP PAYMENTS BY CUSTOMER ID
+    // Reorganize payments into a key-value structure: { "customerId": [ payment1, payment2 ] }
+    const paymentsByCustomer = {};
+    allLedgerPayments.forEach((payment) => {
+      const custId = payment.customerId.toString();
+      if (!paymentsByCustomer[custId]) paymentsByCustomer[custId] = [];
 
-    const paymentMap = {};
-    latestPayments.forEach((p) => {
-      paymentMap[p._id.toString()] = p;
+      paymentsByCustomer[custId].push({
+        id: payment._id,
+        amountPaid: payment.amountPaid,
+        paymentDate: payment.paymentDate || payment.createdAt,
+        note: payment.note || "No note provided",
+      });
     });
 
-    // 6. Combine Customer Details, Debt, Unpaid Sales, and Ledger Info
+    // 6️⃣ ASSEMBLE CREDIT ACCOUNTS OBJECTS
+    // Combine debtor profiles, calculated balances, and payment histories
     const creditAccounts = activeDebtors.map((debtor) => {
-      const cust = debtor.customerDetails;
-      const lastPayment = paymentMap[debtor._id.toString()];
+      const profile = debtor.customerDetails;
+      const history = paymentsByCustomer[debtor._id.toString()] || [];
 
       return {
-        id: cust._id,
-        customerName: cust.fullName,
-        phone: cust.phone,
+        id: profile._id,
+        customerName: profile.fullName,
+        phone: profile.phone,
         totalOwed: debtor.liveTotalOwed,
         amountPaid: debtor.liveTotalPaid,
-        unpaidSales: debtor.unpaidSales || [],
-        reminderNote: cust.notes || "",
-        lastPaymentDate: lastPayment ? lastPayment.lastPaymentDate : null,
-        lastPaymentAmount: lastPayment ? lastPayment.lastPaymentAmount : 0,
-        lastPaymentNote: lastPayment ? lastPayment.lastPaymentNote : "",
-        lastUpdated: cust.updatedAt,
+        totalCredit: debtor.totalCredit,
+        reminderNote: profile.notes || "",
+        paymentHistory: history, // Array of past payments for modal breakdown
+        lastPaymentDate: history[0]?.paymentDate || null, // Latest payment date
+        lastPaymentAmount: history[0]?.amountPaid || 0, // Latest payment amount
+        lastPaymentNote: history[0]?.note || "",
       };
     });
 
+    // 7️⃣ SEND JSON RESPONSE TO FRONTEND
+    // Structure keys (products, creditAccounts, operationalExpenses) match expected React state
     return res.status(200).json({
       success: true,
-      timeframe,
       products: productSales,
       creditAccounts,
       operationalExpenses,
     });
   } catch (error) {
-    console.error("Error fetching financial overview:", error);
+    console.error("Error executing financial overview query:", error);
     return res.status(500).json({
       success: false,
-      message: "Failed to fetch financial overview metrics.",
+      message: "Server error fetching analytics data.",
       error: error.message,
     });
   }

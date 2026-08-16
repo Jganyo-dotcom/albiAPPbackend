@@ -235,7 +235,7 @@ export const verify = async (req, res) => {
         return res.status(401).json({ message: "User account not found" });
       }
 
-      return res.status(200).json({message:"All is well"})
+      return res.status(200).json({ success: true, message: "All is well" });
     } catch (error) {
       console.error("Token verification error:", error);
       return res.status(401).json({ message: "Not authorized, invalid token" });

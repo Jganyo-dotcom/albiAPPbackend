@@ -12,6 +12,12 @@ const paymentLedgerSchema = new mongoose.Schema(
       required: true,
       ref: "User", // Fixed: Model names must be passed as a string
     },
+    companyId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Company",
+      required: true,
+      index: true, // Speeds up queries across all store sales
+    },
     amountPaid: {
       type: Number,
       required: true,
