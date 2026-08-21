@@ -301,7 +301,7 @@ export const forgotPassword = async (req, res) => {
     await user.save();
 
     // 5. Construct frontend URL
-    const frontendUrl = process.env.forgetPassword || "http://localhost:5173";
+    const frontendUrl = process.env.FRONTEND_URL
     const resetUrl = `${frontendUrl}/forgetPassword?token=${resetToken}`;
 
     // 6. Send email
