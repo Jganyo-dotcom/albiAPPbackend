@@ -8,11 +8,10 @@ const userSchema = new mongoose.Schema(
       uppercase: true,
       trim: true,
     },
-    // Fixed typo: Changed 'comapany' to 'company'
     company: {
-      type: mongoose.Schema.Types.ObjectId, // Fixed path to ObjectId
+      type: mongoose.Schema.Types.ObjectId,
       required: true,
-      ref: "Company", // Fixed: Model names must be passed as a string
+      ref: "Company",
     },
     email: {
       type: String,
@@ -30,6 +29,14 @@ const userSchema = new mongoose.Schema(
       type: String,
       enum: ["Store Admin", "Manager", "Cashier"],
       default: "Store Admin",
+    },
+    resetToken: {
+      type: String,
+      default: null,
+    },
+    resetTokenExpires: {
+      type: Date,
+      default: null,
     },
   },
   { timestamps: true },

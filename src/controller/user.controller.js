@@ -247,3 +247,147 @@ export const verify = async (req, res) => {
     return res.status(401).json({ message: "Not authorized, token missing" });
   }
 };
+
+// @desc    Send password reset email (Requires Company Reference + Email)
+// @route   POST /api/auth/forgot-password
+// @access  Public
+export const forgotPassword = async (req, res) => {
+  try {
+    const { companyref, email } = req.body;
+
+    // 1. Validate both inputs exist
+    if (!companyref || !email) {
+      return res.status(400).json({
+        message: "Please provide both Company Reference and Email address",
+      });
+    }
+
+    const normalizedCompanyRef = companyref.toUpperCase().trim();
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // 2. Find the company by reference code
+    const company = await Company.findOne({
+      reference: normalizedCompanyRef,
+    });
+
+    if (!company) {
+      return res.status(404).json({
+        message: "Invalid company reference or email address",
+      });
+    }
+
+    // 3. Find user linked to this specific company & email
+    const user = await User.findOne({
+      email: normalizedEmail,
+      company: company._id,
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        message: "Invalid company reference or email address",
+      });
+    }
+
+    // 4. Generate 15-minute JWT reset token
+    const resetToken = jwt.sign(
+      { id: user._id, companyId: company._id },
+      process.env.JWT_SECRET,
+      { expiresIn: "15m" },
+    );
+
+    // Save token and 1-hour expiration timestamp to database
+    user.resetToken = resetToken;
+    user.resetTokenExpires = Date.now() + 3600000; // 1 hour in milliseconds
+    await user.save();
+
+    // 5. Construct frontend URL
+    const frontendUrl = process.env.forgetPassword || "http://localhost:5173";
+    const resetUrl = `${frontendUrl}/forgetPassword?token=${resetToken}`;
+
+    // 6. Send email
+    try {
+      await sendUniversalMail("reset_password_Mail", {
+        recipientEmail: normalizedEmail,
+        recipientName: user.name,
+        companyRef: company.reference,
+        resetUrl,
+        subject: "Password Reset Request",
+      });
+    } catch (mailError) {
+      console.error("Failed to send reset email:", mailError.message);
+      return res.status(500).json({
+        message: "Could not send reset email. Please try again later.",
+      });
+    }
+
+    return res.status(200).json({
+      message: "Password reset link sent to your email address.",
+    });
+  } catch (error) {
+    console.error("Forgot Password Error:", error);
+    return res
+      .status(500)
+      .json({ message: "Server error during password reset request" });
+  }
+};
+
+// @desc    Verify reset token & update user password
+// @route   POST /api/auth/reset-password
+// @access  Public
+export const resetPassword = async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+
+    // 1. Validate inputs
+    if (!token || !newPassword) {
+      return res.status(400).json({
+        message: "Reset token and new password are required",
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        message: "Password must be at least 6 characters long",
+      });
+    }
+
+    // 2. Verify JWT token signature
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(400).json({
+        message: "Invalid or expired token. Please request a new link.",
+      });
+    }
+
+    // 3. Find user matching ID, saved token, and valid expiration date
+    const user = await User.findOne({
+      _id: decoded.id,
+      resetToken: token,
+      resetTokenExpires: { $gt: Date.now() },
+    });
+
+    if (!user) {
+      return res.status(400).json({
+        message: "Reset link is invalid, expired, or has already been used.",
+      });
+    }
+
+    // 4. Hash new password & clear database reset fields to prevent reuse
+    const salt = await bcrypt.genSalt(10);
+    user.password = await bcrypt.hash(newPassword, salt);
+    user.resetToken = undefined;
+    user.resetTokenExpires = undefined;
+    await user.save();
+
+    return res.status(200).json({
+      message: "Password successfully updated! You can now log in.",
+    });
+  } catch (error) {
+    console.error("Reset Password Error:", error);
+    return res
+      .status(500)
+      .json({ message: "Server error while updating password" });
+  }
+};

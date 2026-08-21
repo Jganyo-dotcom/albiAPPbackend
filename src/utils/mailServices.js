@@ -1,9 +1,10 @@
 import { verificationTemplate } from "../emailTemplates.js/verificationEmailTemplate.js";
+import { resetPasswordTemplate } from "../emailTemplates.js/resetPasswordEmailTemplate.js";
 import { BrevoClient } from "@getbrevo/brevo";
 
-
 export const sendUniversalMail = async (type, options) => {
-  const { recipientEmail, recipientName, subject, companyRef } = options;
+  const { recipientEmail, recipientName, subject, companyRef, resetUrl } =
+    options;
   const currentYear = new Date().getFullYear();
 
   // Basic input validation guard
@@ -14,8 +15,7 @@ export const sendUniversalMail = async (type, options) => {
     return null;
   }
 
-  // 🔄 FIXED: Initialize inside the function block instead
-  // This guarantees process.env.BREVO_API_KEY is loaded and readable from RAM!
+  // Initialize Brevo client inside function to capture process.env reliably
   const brevo = new BrevoClient({ apiKey: process.env.BREVO_API_KEY });
 
   let htmlContent = "";
@@ -23,13 +23,19 @@ export const sendUniversalMail = async (type, options) => {
   // Select template explicitly based on strict type indicator
   if (type === "verification_Mail") {
     htmlContent = verificationTemplate(recipientName, companyRef, currentYear);
+  } else if (type === "reset_password_Mail") {
+    htmlContent = resetPasswordTemplate(
+      recipientName,
+      resetUrl,
+      companyRef,
+      currentYear,
+    );
   }
 
   try {
-    // 3. EXECUTION: Dispatches cleanly via the unified namespaced service client
     const data = await brevo.transactionalEmails.sendTransacEmail({
       to: [{ email: recipientEmail, name: recipientName }],
-      sender: { email: "elikemjjames@gmail.com", name: "CloudPlaza" },
+      sender: { email: "elikemjjames@gmail.com", name: "FinconManager" },
       subject: subject,
       htmlContent: htmlContent,
     });
