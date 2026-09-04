@@ -8,6 +8,7 @@ import {
   getDebtors,
   getAllCustomersSummary,
   getFinancialOverview,
+  sendInvoiceReceiptEmail,
 } from "../controller/customer.js";
 import { protect } from "../middleware/auth.js";
 
@@ -42,6 +43,7 @@ router.get("/", getSalesLedger);
 // 4. DYNAMIC / PARAMETERIZED ROUTES (Must come last)
 // ====================================================
 router.get("/:id/receipt", getSaleReceipt);
+router.post("/:saleId/send-receipt", protect, sendInvoiceReceiptEmail);
 router.post("/:id/pay-debt", payDebt); // Fallback if ID is supplied directly in URL path
 
 export default router;

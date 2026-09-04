@@ -10,6 +10,7 @@ import {
   reverseExpense,
 } from "../controller/product.js";
 import { protect } from "../middleware/auth.js";
+import { getCompanyAuditLogs } from "../controller/user.controller.js";
 
 const router = express.Router();
 
@@ -20,10 +21,10 @@ router.get("/metrics", getDashboardMetrics);
 
 // Product Routes
 router.get("/products", getProducts);
+router.get("/audit-logs", getCompanyAuditLogs);
 router.post("/products", createProduct);
 router.patch("/products/:productId/restock", restockProduct);
 router.patch("/products/:productId/price", updateProductPrices); //same as edit he whole thing
-
 
 // Expense Routes
 router.get("/expenses", getExpenses);

@@ -40,6 +40,11 @@ const productSchema = new mongoose.Schema(
       min: [1, "Units per pack must be at least 1"],
       default: 1,
     },
+    packSellingPrice: {
+      type: Number,
+      min: [0, "Pack selling price cannot be negative"],
+      default: 0.0,
+    },
     stockQuantity: {
       type: Number,
       required: true,

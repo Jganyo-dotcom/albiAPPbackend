@@ -5,6 +5,9 @@ import { Product } from "../models/product.js";
 import ExcelJS from "exceljs/dist/exceljs.js";
 import PaymentLedger from "../models/paymentLedger.js";
 import { Expense } from "../models/Expense.js";
+import { logAudit } from "../utils/audit.js";
+import { sendUniversalMail } from "../utils/mailServices.js";
+import Company from "../models/company.js";
 
 /**
  * Helper to safely extract and validate authorization context
@@ -28,6 +31,7 @@ const getAuthContext = (req) => {
  * 1. POST /api/sales/sync
  * Syncs offline/bulk transactions: Creates/Updates Customer and saves individual Sales
  */
+
 export const syncCustomers = async (req, res) => {
   try {
     const auth = getAuthContext(req);
@@ -38,7 +42,6 @@ export const syncCustomers = async (req, res) => {
       });
     }
     const { companyId, inputer } = auth;
-
     const { customers } = req.body;
 
     if (!customers || !Array.isArray(customers) || customers.length === 0) {
@@ -52,12 +55,14 @@ export const syncCustomers = async (req, res) => {
     const productIds = [];
     customers.forEach((c) => {
       (c.items || []).forEach((item) => {
-        const id = item.id || item.product || item._id;
-        if (id) productIds.push(id);
+        let rawId = item.id || item.product || item._id;
+        if (rawId) {
+          const cleanId = rawId.toString().split("-")[0];
+          productIds.push(cleanId);
+        }
       });
     });
 
-    // Fetch actual products from MongoDB scoped by companyId
     const dbProducts = await Product.find({
       _id: { $in: productIds },
       companyId,
@@ -76,33 +81,58 @@ export const syncCustomers = async (req, res) => {
       const saleItems = [];
       const customerItems = [];
 
-      // 2. Calculate true total using the correct Product Schema field
+      // ✨ NEW: Temporary array to log item counts + names for the log sentence
+      const itemSummaries = [];
+
       for (const item of c.items || []) {
-        const productId = item.id || item.product || item._id;
-        const dbProduct = productMap.get(productId?.toString());
+        let rawId = item.id || item.product || item._id;
+        const productId = rawId?.toString().split("-")[0];
+        const dbProduct = productMap.get(productId);
 
         if (!dbProduct) {
           throw new Error(`Product not found in database for ID: ${productId}`);
         }
 
         const qty = parseInt(item.qty, 10) || 1;
+        const isPackSale = item.saleType === "Pack";
 
-        const unitPrice = Number(dbProduct.unitPrice ?? item.unitPrice ?? 0);
-        const unitCost = Number(dbProduct.costPrice ?? item.unitCost ?? 0);
+        let unitPrice = 0;
+        let unitCost = 0;
+        let unitsToDeduct = 0;
+
+        if (isPackSale) {
+          unitPrice = Number(
+            dbProduct.packSellingPrice ||
+              dbProduct.unitPrice * (dbProduct.unitsPerPack || 1),
+          );
+          unitCost = Number(
+            dbProduct.costPricePerPack ||
+              dbProduct.costPrice * (dbProduct.unitsPerPack || 1),
+          );
+          unitsToDeduct = qty * (dbProduct.unitsPerPack || 1);
+
+          // Add Pack tag summary string tracker
+          itemSummaries.push(`${qty}x ${dbProduct.name} (Pack)`);
+        } else {
+          unitPrice = Number(dbProduct.unitPrice ?? item.unitPrice ?? 0);
+          unitCost = Number(dbProduct.costPrice ?? item.unitCost ?? 0);
+          unitsToDeduct = qty;
+
+          itemSummaries.push(`${qty}x ${dbProduct.name}`);
+        }
 
         const itemSubtotal = unitPrice * qty;
         calculatedTotalAmount += itemSubtotal;
 
-        // Structure item for Sale schema
         saleItems.push({
           product: dbProduct._id,
           name: dbProduct.name || item.name,
+          category: dbProduct.category || "Any",
           qty,
           unitPrice,
           unitCost,
         });
 
-        // Structure item for Customer schema
         customerItems.push({
           product: dbProduct._id,
           name: dbProduct.name || item.name,
@@ -110,19 +140,15 @@ export const syncCustomers = async (req, res) => {
           unitPrice,
         });
 
-        // Prepare bulk update for inventory stock reduction scoped by companyId
         stockUpdates.push({
           updateOne: {
             filter: { _id: dbProduct._id, companyId },
-            update: { $inc: { stockQuantity: -Math.abs(qty) } },
+            update: { $inc: { stockQuantity: -Math.abs(unitsToDeduct) } },
           },
         });
       }
 
-      // 3. Extract amount paid today sent from the frontend
       const amountPaidToday = parseFloat(c.amountSpent ?? c.amountPaid ?? 0);
-
-      // Calculate debt
       const amountOwe =
         calculatedTotalAmount > amountPaidToday
           ? calculatedTotalAmount - amountPaidToday
@@ -135,13 +161,12 @@ export const syncCustomers = async (req, res) => {
         paymentStatus = "Unpaid";
       }
 
-      // 4. Find or Create/Update Customer Document scoped by companyId
       const phoneTrimmed = c.phone.trim();
       let customerRecord = await Customer.findOne({
         phone: phoneTrimmed,
         companyId,
       });
-
+      console.log(c.email);
       if (!customerRecord) {
         customerRecord = await Customer.create({
           companyId,
@@ -159,7 +184,12 @@ export const syncCustomers = async (req, res) => {
           items: customerItems,
         });
       } else {
-        // Cumulatively increment balances for existing customer
+        if (c.email && c.email.trim() !== "") {
+          customerRecord.email = c.email.trim();
+        }
+        if (c.address && c.address.trim() !== "") {
+          customerRecord.address = c.address.trim();
+        }
         customerRecord.totalAmount += calculatedTotalAmount;
         customerRecord.amountSpent += amountPaidToday;
         customerRecord.amountOwe += amountOwe;
@@ -167,7 +197,6 @@ export const syncCustomers = async (req, res) => {
         await customerRecord.save();
       }
 
-      // 5. Create Sale Document with companyId and inputer
       const newSale = await Sale.create({
         companyId,
         inputer,
@@ -183,9 +212,23 @@ export const syncCustomers = async (req, res) => {
       });
 
       createdSales.push(newSale);
+
+      // ✨ Join items into a comma-separated sentence breakdown line
+      const basketSummaryText = itemSummaries.join(", ");
+
+      // 🔄 Trigger Security Audit Log with custom item breakdowns
+      await logAudit(
+        inputer,
+        "SERVE_CUSTOMER",
+        customerRecord._id,
+        "Customer",
+        "Customer",
+        companyId,
+        "Successful",
+        basketSummaryText, // Pass text payload summary here
+      );
     }
 
-    // 6. Execute stock reductions
     if (stockUpdates.length > 0) {
       await Product.bulkWrite(stockUpdates);
     }
@@ -274,7 +317,8 @@ export const getSalesLedger = async (req, res) => {
     // 5. Execute DB Queries in Parallel
     const [sales, totalItems, aggregateMetrics] = await Promise.all([
       Sale.find(query)
-        .populate("customer", "fullName phone customerType")
+        // ✨ REVISED: Added 'email' to the populated customer fields layout
+        .populate("customer", "fullName phone customerType email address")
         .populate("items.product", "name price category")
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -519,7 +563,19 @@ export const payDebt = async (req, res) => {
       paymentDate: new Date(),
     });
 
-    res.status(200).json({
+    // 🔄 TRIGGER AUDIT LOG: Catching the full repayment event context
+    await logAudit(
+      inputer,
+      "COLLECT_DEBT",
+      customerId, // Points directly to the Customer's Object ID
+      "Customer",
+      "Customer",
+      companyId,
+      "Successful",
+      `GH₵${parsedAmount.toFixed(2)}`, // Pass the amount collected into customDetails
+    );
+
+    return res.status(200).json({
       success: true,
       message: "Debt payment updated successfully",
       data: {
@@ -529,7 +585,21 @@ export const payDebt = async (req, res) => {
     });
   } catch (error) {
     console.error("Error logging debt payment:", error);
-    res.status(500).json({
+
+    const auth = getAuthContext(req);
+    if (auth) {
+      await logAudit(
+        auth.inputer,
+        "COLLECT_DEBT",
+        null,
+        "Customer",
+        "Customer",
+        auth.companyId,
+        "Failed",
+      );
+    }
+
+    return res.status(500).json({
       success: false,
       message: "Server error processing debt payment",
     });
@@ -933,6 +1003,101 @@ export const getFinancialOverview = async (req, res) => {
       success: false,
       message: "Server error fetching analytics data.",
       error: error.message,
+    });
+  }
+};
+
+export const sendInvoiceReceiptEmail = async (req, res) => {
+  try {
+    const auth = getAuthContext(req);
+    if (!auth) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized: Missing company context.",
+      });
+    }
+    const { companyId, inputer } = auth;
+    const { saleId } = req.params;
+
+    // 1. Fetch sale information and populate the customer profile details
+    const saleRecord = await Sale.findOne({ _id: saleId, companyId }).populate(
+      "customer",
+    );
+    if (!saleRecord) {
+      return res.status(404).json({
+        success: false,
+        message: "Sale transaction record not found.",
+      });
+    }
+
+    const customerProfile = saleRecord.customer;
+    if (!customerProfile || !customerProfile.email) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "This transaction record is not associated with a valid customer email address account.",
+      });
+    }
+
+    // 2. ✨ NEW: Fetch the actual company details dynamically from your database
+    const currentCompany = await Company.findById(companyId);
+    const storeName = currentCompany?.name || "Our Store";
+
+    // 3. Format individual product line markup summaries
+    const itemizedTextList = (saleRecord.items || [])
+      .map(
+        (item) =>
+          `${item.qty}x ${item.name} @ GH₵${(item.unitPrice || 0).toFixed(2)}`,
+      )
+      .join(", ");
+
+    // 4. Fire the email request payload out, passing down the dynamic 'companyName'
+    try {
+      await sendUniversalMail("customer_receipt_Mail", {
+        recipientEmail: customerProfile.email.toLowerCase().trim(),
+        recipientName: customerProfile.fullName,
+        companyName: storeName, // ✨ Passed dynamic name here
+        invoiceNumber: saleRecord._id.toString(),
+        itemsSummary: itemizedTextList,
+        totalAmount: `GH₵${(saleRecord.totalAmount || 0).toFixed(2)}`,
+        amountPaid: `GH₵${(saleRecord.amountPaid || 0).toFixed(2)}`,
+        amountOwe: `GH₵${(saleRecord.amountOwe || 0).toFixed(2)}`,
+        paymentMethod: saleRecord.paymentMethod,
+        subject: `Your Purchase Receipt from ${storeName} - Invoice #${saleRecord._id.toString().slice(-6).toUpperCase()}`,
+      });
+
+      // TRIGGER AUDIT LOG
+      await logAudit(
+        inputer,
+        "EMAIL_RECEIPT",
+        customerProfile._id,
+        "Customer",
+        "Customer",
+        companyId,
+        "Successful",
+        `Invoice #${saleId}`,
+      );
+    } catch (mailError) {
+      console.error(
+        "Mail server error during receipt dispatch:",
+        mailError.message,
+      );
+      return res.status(500).json({
+        success: false,
+        message:
+          "The mail delivery subsystem failed to deliver the message statement.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Receipt copy successfully queued and dispatched to ${customerProfile.email}.`,
+    });
+  } catch (error) {
+    console.error("Error processing email invoice dispatch:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Server error processing transaction confirmation email.",
     });
   }
 };

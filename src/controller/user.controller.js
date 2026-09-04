@@ -3,6 +3,8 @@ import jwt from "jsonwebtoken";
 import User from "../models/user.js";
 import Company from "../models/company.js";
 import { sendUniversalMail } from "../utils/mailServices.js";
+import { logAudit } from "../utils/audit.js";
+import AuditLog from "../models/AuditLogsSchema.js";
 
 // @desc    Register a new user & company
 // @route   POST /api/auth/register
@@ -92,7 +94,7 @@ export const registerUser = async (req, res) => {
 
     // 9. Non-blocking Mail Delivery (Won't fail registration if mailer is down)
     try {
-      await sendUniversalMail("verification_Mail", {
+      sendUniversalMail("verification_Mail", {
         recipientEmail: normalizedEmail,
         recipientName: user.name,
         companyRef: generatedReference,
@@ -158,6 +160,17 @@ export const loginUser = async (req, res) => {
     });
 
     if (!company) {
+      // FAILED: Company not found. We cannot link this to a company ID or user ID.
+      await logAudit(
+        null, // No userId available
+        "LOGIN", // Action
+        null, // No entityId available
+        "Company", // EntityType
+        "Company", // Path
+        null, // No companyId available
+        "Failed", // Status
+      );
+
       return res
         .status(401)
         .json({ message: "Invalid company reference, email, or password" });
@@ -170,6 +183,17 @@ export const loginUser = async (req, res) => {
     });
 
     if (!user) {
+      // FAILED: User not found under this company.
+      await logAudit(
+        null, // No userId available
+        "LOGIN", // Action
+        null, // No entityId available
+        "Company", // EntityType
+        "Company", // Path
+        company._id, // We have the company ID
+        "Failed", // Status
+      );
+
       return res
         .status(401)
         .json({ message: "Invalid company reference, email, or password" });
@@ -178,6 +202,17 @@ export const loginUser = async (req, res) => {
     // 4. Verify password match
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
+      // FAILED: Incorrect password. We know exactly who tried to log in.
+      await logAudit(
+        user._id, // We know the targeted user ID
+        "LOGIN", // Action
+        user._id, // EntityId (themselves)
+        "Company", // EntityType
+        "Company", // Path
+        company._id, // Company ID
+        "Failed", // Status
+      );
+
       return res
         .status(401)
         .json({ message: "Invalid company reference, email, or password" });
@@ -188,6 +223,17 @@ export const loginUser = async (req, res) => {
       { id: user._id, companyId: company._id },
       process.env.JWT_SECRET,
       { expiresIn: "30d" },
+    );
+
+    // SUCCESSFUL LOGIN: Log it right before sending response
+    await logAudit(
+      user._id, // userId
+      "LOGIN", // action
+      user._id, // entityId
+      "Company", // entityType (matches enum in your schema)
+      "Company", // path (matches enum in your schema)
+      company._id, // companyId
+      "Successful", // status
     );
 
     // 6. Return response
@@ -208,7 +254,60 @@ export const loginUser = async (req, res) => {
     });
   } catch (error) {
     console.error("Login Error:", error);
+
+    // SERVER ERROR LOG: Optional system failure logger
+    await logAudit(null, "LOGIN", null, "Company", "Company", null, "Failed");
+
     return res.status(500).json({ message: "Server error during login" });
+  }
+};
+
+export const getUserProfile = async (req, res) => {
+  try {
+    // Using findOne so it returns a single object instead of an array
+    const user = await User.findOne({
+      _id: req.user.id,
+      company: req.user.companyId,
+    }).select("-password");
+
+    if (!user) {
+      return res.status(404).json({ message: "User profile not found." });
+    }
+    return res.status(200).json(user);
+  } catch (error) {
+    return res.status(500).json({ message: "Server error fetching profile." });
+  }
+};
+
+export const getCompanyEmployees = async (req, res) => {
+  try {
+    // Fixed Mongoose syntax to properly exclude Store Admins ($ne operator)
+    const employees = await User.find({
+      company: req.user.companyId,
+      role: { $ne: "Store Admin" },
+    }).select("-password");
+
+    return res.status(200).json(employees);
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Server error fetching employees." });
+  }
+};
+
+export const getBusinessSettings = async (req, res) => {
+  try {
+    const business = await Company.findById(req.user.companyId);
+    if (!business) {
+      return res
+        .status(404)
+        .json({ message: "Business profile details not found." });
+    }
+    return res.status(200).json(business);
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Server error fetching business configurations." });
   }
 };
 
@@ -271,6 +370,17 @@ export const forgotPassword = async (req, res) => {
     });
 
     if (!company) {
+      // AUDIT LOG: Company code does not exist
+      await logAudit(
+        null, // No user ID available
+        "PASSWORD_RESET_REQ", // Action
+        null, // No entity ID
+        "Company", // EntityType
+        "Company", // Path
+        company._id, // No company ID
+        "Failed", // Status
+      );
+
       return res.status(404).json({
         message: "Invalid company reference or email address",
       });
@@ -283,6 +393,17 @@ export const forgotPassword = async (req, res) => {
     });
 
     if (!user) {
+      // AUDIT LOG: Email doesn't match any user inside this specific company
+      await logAudit(
+        null, // No performing user logged in
+        "PASSWORD_RESET_REQ", // Action
+        null, // No target user found
+        "Company", // EntityType
+        "Company", // Path
+        company._id, // We have the company ID
+        "Failed", // Status
+      );
+
       return res.status(404).json({
         message: "Invalid company reference or email address",
       });
@@ -301,7 +422,7 @@ export const forgotPassword = async (req, res) => {
     await user.save();
 
     // 5. Construct frontend URL
-    const frontendUrl = process.env.FRONTEND_URL
+    const frontendUrl = process.env.FRONTEND_URL;
     const resetUrl = `${frontendUrl}/forgetPassword?token=${resetToken}`;
 
     // 6. Send email
@@ -313,8 +434,20 @@ export const forgotPassword = async (req, res) => {
         resetUrl,
         subject: "Password Reset Request",
       });
+
+      // SUCCESSFUL AUDIT LOG: Mail sent completely
+      await logAudit(
+        user._id, // The user requested it
+        "RESET_PASSWORD", // Maps to your audit.js switch case
+        user._id, // Target is their own account profile
+        "Company", // EntityType (Uses Company table/User)
+        "Company", // Path
+        company._id, // Company ID
+        "Successful", // Status
+      );
     } catch (mailError) {
       console.error("Failed to send reset email:", mailError.message);
+
       return res.status(500).json({
         message: "Could not send reset email. Please try again later.",
       });
@@ -351,7 +484,7 @@ export const resetPassword = async (req, res) => {
       });
     }
 
-    // 2. Verify JWT token signature
+    // 2. Decode and verify the token signature (CRITICAL STEP ADDED BACK)
     let decoded;
     try {
       decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -369,6 +502,17 @@ export const resetPassword = async (req, res) => {
     });
 
     if (!user) {
+      // AUDIT LOG: Valid signature but token does not match DB or has expired
+      await logAudit(
+        decoded.id || null, // Attempted user id from decoded token
+        "PASSWORD_RESET_SUBMIT",
+        decoded.id || null,
+        "Company",
+        "Company",
+        decoded.companyId || null,
+        "Failed",
+      );
+
       return res.status(400).json({
         message: "Reset link is invalid, expired, or has already been used.",
       });
@@ -381,6 +525,17 @@ export const resetPassword = async (req, res) => {
     user.resetTokenExpires = undefined;
     await user.save();
 
+    // SUCCESSFUL AUDIT LOG: Password successfully updated
+    await logAudit(
+      user._id, // The user who triggered the update
+      "RESET_PASSWORD", // Matches your audit.js switch case
+      user._id, // Target is their own profile
+      "Company", // EntityType (Uses Company table/User)
+      "Company", // Path
+      user.company, // Linked company reference ID
+      "Successful", // Status
+    );
+
     return res.status(200).json({
       message: "Password successfully updated! You can now log in.",
     });
@@ -389,5 +544,36 @@ export const resetPassword = async (req, res) => {
     return res
       .status(500)
       .json({ message: "Server error while updating password" });
+  }
+};
+
+export const getCompanyAuditLogs = async (req, res) => {
+  try {
+    // 1. Get the company ID from the authenticated user token payload
+    const userCompanyId = req.user.companyId;
+
+    if (!userCompanyId) {
+      return res
+        .status(400)
+        .json({ message: "Authentication error: Company context missing." });
+    }
+
+    // 2. Fetch logs and apply simple .populate() chains
+    const logs = await AuditLog.find({ company: userCompanyId })
+      .populate("userId", "name role email") // Pulls data for the person who did the action
+      .populate("entityId") // Automatically uses 'entityType' value to choose User or Customer
+      .sort({ createdAt: -1 }); // Newest logs first
+
+    // 3. Return the populated logs
+    return res.status(200).json({
+      success: true,
+      count: logs.length,
+      data: logs,
+    });
+  } catch (error) {
+    console.error("Error fetching company audit logs:", error);
+    return res
+      .status(500)
+      .json({ message: "Server error while fetching log history." });
   }
 };
