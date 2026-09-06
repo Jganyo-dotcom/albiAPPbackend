@@ -1,6 +1,7 @@
 import { verificationTemplate } from "../emailTemplates.js/verificationEmailTemplate.js";
 import { resetPasswordTemplate } from "../emailTemplates.js/resetPasswordEmailTemplate.js";
 import { customerReceiptTemplate } from "../emailTemplates.js/customerReceiptTemplate.js";
+import { deviceOtpTemplate } from "../emailTemplates.js/deviceOtpTemplate.js"; // New template import
 import { BrevoClient } from "@getbrevo/brevo";
 
 export const sendUniversalMail = async (type, options) => {
@@ -9,7 +10,7 @@ export const sendUniversalMail = async (type, options) => {
     recipientEmail,
     recipientName,
     subject,
-    companyRef,
+    companyRef, // Will contain the 6-digit OTP code string for the new case
     resetUrl,
     companyName,
   } = options;
@@ -37,12 +38,20 @@ export const sendUniversalMail = async (type, options) => {
     );
   } else if (type === "customer_receipt_Mail") {
     htmlContent = customerReceiptTemplate(recipientName, options, currentYear);
+  } else if (type === "verification_OTP") {
+    // ⭐ NEW CASE: Matches your updated trigger setup
+    htmlContent = deviceOtpTemplate(
+      recipientName,
+      companyRef,
+      companyName,
+      currentYear,
+    );
   }
 
   try {
     const data = await brevo.transactionalEmails.sendTransacEmail({
       to: [{ email: recipientEmail, name: recipientName }],
-      // ✨ REVISED: Sender display name falls back to company name for better branding
+      // Sender display name falls back to company name for better branding
       sender: {
         email: "elikemjjames@gmail.com",
         name: companyName || "FinconManager",

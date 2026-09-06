@@ -38,6 +38,27 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    // New fields for managing unauthorized device logins
+    devices: {
+      type: [String],
+      default: [], // Array of trusted device fingerprints or IDs
+    },
+    deviceOtp: {
+      type: String,
+      default: null,
+    },
+    deviceOtpExpires: {
+      type: Date,
+      default: null,
+    },
+    pendingDevice: {
+      type: String,
+      default: null, // Holds the unknown device until OTP is verified
+    }, 
+    lastOtpResentAt: {
+      type: Date,
+      default: null,
+    },
   },
   { timestamps: true },
 );

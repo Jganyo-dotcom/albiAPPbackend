@@ -138,8 +138,10 @@ export const registerUser = async (req, res) => {
   }
 };
 
-// @desc    Authenticate user & get token
-// @route   POST /api/auth/login
+// Helper function to generate a 6-digit OTP
+const generateOTP = () =>
+  Math.floor(100000 + Math.random() * 900000).toString();
+
 export const loginUser = async (req, res) => {
   try {
     const { companyReference, email, password } = req.body;
@@ -160,17 +162,6 @@ export const loginUser = async (req, res) => {
     });
 
     if (!company) {
-      // FAILED: Company not found. We cannot link this to a company ID or user ID.
-      await logAudit(
-        null, // No userId available
-        "LOGIN", // Action
-        null, // No entityId available
-        "Company", // EntityType
-        "Company", // Path
-        null, // No companyId available
-        "Failed", // Status
-      );
-
       return res
         .status(401)
         .json({ message: "Invalid company reference, email, or password" });
@@ -183,17 +174,6 @@ export const loginUser = async (req, res) => {
     });
 
     if (!user) {
-      // FAILED: User not found under this company.
-      await logAudit(
-        null, // No userId available
-        "LOGIN", // Action
-        null, // No entityId available
-        "Company", // EntityType
-        "Company", // Path
-        company._id, // We have the company ID
-        "Failed", // Status
-      );
-
       return res
         .status(401)
         .json({ message: "Invalid company reference, email, or password" });
@@ -202,23 +182,69 @@ export const loginUser = async (req, res) => {
     // 4. Verify password match
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      // FAILED: Incorrect password. We know exactly who tried to log in.
       await logAudit(
-        user._id, // We know the targeted user ID
-        "LOGIN", // Action
-        user._id, // EntityId (themselves)
-        "Company", // EntityType
-        "Company", // Path
-        company._id, // Company ID
-        "Failed", // Status
+        user._id,
+        "LOGIN",
+        user._id,
+        "Company",
+        "Company",
+        company._id,
+        "Failed",
       );
-
       return res
         .status(401)
         .json({ message: "Invalid company reference, email, or password" });
     }
 
-    // 5. Generate token payload
+    // ⭐ NEW: 4.5. Device Verification Logic
+    // Extract unique ID from header or fall back to user-agent
+    const deviceId = req.headers["x-device-id"] || req.headers["user-agent"];
+    if (!deviceId) {
+      return res.status(400).json({ message: "Device identification missing" });
+    }
+
+    const isDeviceRecognized = user.devices && user.devices.includes(deviceId);
+
+    if (!isDeviceRecognized) {
+      const otp = generateOTP();
+
+      // Save device OTP configurations to the user document
+      user.deviceOtp = otp;
+      user.deviceOtpExpires = Date.now() + 10 * 60 * 1000; // Valid for 10 minutes
+      user.pendingDevice = deviceId;
+      await user.save();
+
+      // Trigger your universal mail handler
+      // We are passing the code inside 'companyRef' because your template consumes it there
+      // await sendUniversalMail("verification_OTP", {
+      //   recipientEmail: user.email,
+      //   recipientName: user.name,
+      //   subject: "Secure Login: Verify Your New Device",
+      //   companyRef: otp,
+      //   companyName: company.name,
+      // });
+
+      // Audit log the verification hold
+      await logAudit(
+        user._id,
+        "LOGIN_VERIFICATION_REQUIRED",
+        user._id,
+        "Company",
+        "Company",
+        company._id,
+        "Successful",
+      );
+
+      // Return a 403 telling the frontend to display the OTP input form
+      return res.status(200).json({
+        message:
+          "Unfamiliar device detected. An OTP has been sent to your email.",
+        requiresOtp: true,
+        email: user.email,
+      });
+    }
+
+    // 5. Generate token payload (Proceed if device is recognized)
     const token = jwt.sign(
       { id: user._id, companyId: company._id },
       process.env.JWT_SECRET,
@@ -227,13 +253,13 @@ export const loginUser = async (req, res) => {
 
     // SUCCESSFUL LOGIN: Log it right before sending response
     await logAudit(
-      user._id, // userId
-      "LOGIN", // action
-      user._id, // entityId
-      "Company", // entityType (matches enum in your schema)
-      "Company", // path (matches enum in your schema)
-      company._id, // companyId
-      "Successful", // status
+      user._id,
+      "LOGIN",
+      user._id,
+      "Company",
+      "Company",
+      company._id,
+      "Successful",
     );
 
     // 6. Return response
@@ -254,11 +280,132 @@ export const loginUser = async (req, res) => {
     });
   } catch (error) {
     console.error("Login Error:", error);
-
-    // SERVER ERROR LOG: Optional system failure logger
     await logAudit(null, "LOGIN", null, "Company", "Company", null, "Failed");
-
     return res.status(500).json({ message: "Server error during login" });
+  }
+};
+
+export const verifyDeviceOtp = async (req, res) => {
+  const { email, otp } = req.body;
+
+  try {
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Check if OTP matches and hasn't expired
+    if (
+      !user.deviceOtp ||
+      user.deviceOtp !== otp ||
+      Date.now() > user.deviceOtpExpires
+    ) {
+      return res.status(400).json({ message: "Invalid or expired OTP" });
+    }
+
+    // Add the pending device to the recognized list
+    if (user.pendingDevice && !user.devices.includes(user.pendingDevice)) {
+      user.devices.push(user.pendingDevice);
+    }
+
+    // Clear OTP fields
+    user.deviceOtp = undefined;
+    user.deviceOtpExpires = undefined;
+    user.pendingDevice = undefined;
+
+    await user.save();
+
+    return res
+      .status(200)
+      .json({ message: "Device successfully authorized. You can now log in." });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
+  }
+};
+
+
+
+
+export const resendDeviceOtp = async (req, res) => {
+  try {
+    const { companyReference, email } = req.body;
+
+    // 1. Validate fields
+    if (!companyReference || !email) {
+      return res.status(400).json({
+        message: "Please provide company reference and email address",
+      });
+    }
+
+    const normalizedCompanyRef = companyReference.toUpperCase().trim();
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // 2. Verify the company exists
+    const company = await Company.findOne({ reference: normalizedCompanyRef });
+    if (!company) {
+      return res.status(404).json({ message: "Company reference not found" });
+    }
+
+    // 3. Find the user linked to this company
+    const user = await User.findOne({
+      email: normalizedEmail,
+      company: company._id,
+    });
+
+    if (!user) {
+      return res.status(404).json({ message: "User account not found" });
+    }
+
+    // 4. Ensure there is an active device verification process pending
+    if (!user.pendingDevice) {
+      return res.status(400).json({
+        message:
+          "No pending device verification found for this account. Please log in again.",
+      });
+    }
+
+    // ⭐ NEW: 4.5. Anti-Spam / Rate-Limiting Guard (60 Seconds Cooldown)
+    const COOLDOWN_MS = 60 * 1000; // 60 seconds
+    if (user.lastOtpResentAt) {
+      const timePassed = Date.now() - new Date(user.lastOtpResentAt).getTime();
+
+      if (timePassed < COOLDOWN_MS) {
+        const secondsLeft = Math.ceil((COOLDOWN_MS - timePassed) / 1000);
+        return res.status(429).json({
+          // 429 is the standard HTTP status for Too Many Requests
+          message: `Please wait ${secondsLeft} second(s) before requesting another security code.`,
+          retryAfterSeconds: secondsLeft,
+        });
+      }
+    }
+
+    // 5. Generate a brand new OTP code
+    const newOtp = generateOTP();
+    user.deviceOtp = newOtp;
+    user.deviceOtpExpires = Date.now() + 10 * 60 * 1000; // Reset validity timer for 10 minutes
+    user.lastOtpResentAt = Date.now(); // Record current timestamp to restart cooldown block
+    await user.save();
+
+    // 6. Deliver the code via your universal mail system
+    await sendUniversalMail("verification_OTP", {
+      recipientEmail: user.email,
+      recipientName: user.name,
+      subject: "Resend Code: Verify Your New Device",
+      companyRef: newOtp,
+      companyName: company.name,
+    });
+
+    return res.status(200).json({
+      message: "A fresh security code has been routed to your email.",
+    });
+  } catch (error) {
+    console.error("Resend OTP Error:", error);
+    return res
+      .status(500)
+      .json({ message: "Server error while resending security code" });
   }
 };
 
@@ -267,7 +414,7 @@ export const getUserProfile = async (req, res) => {
     // Using findOne so it returns a single object instead of an array
     const user = await User.findOne({
       _id: req.user.id,
-      company: req.user.companyId,
+      company: req.user.company,
     }).select("-password");
 
     if (!user) {
@@ -283,7 +430,7 @@ export const getCompanyEmployees = async (req, res) => {
   try {
     // Fixed Mongoose syntax to properly exclude Store Admins ($ne operator)
     const employees = await User.find({
-      company: req.user.companyId,
+      company: req.user.company,
       role: { $ne: "Store Admin" },
     }).select("-password");
 
@@ -297,7 +444,7 @@ export const getCompanyEmployees = async (req, res) => {
 
 export const getBusinessSettings = async (req, res) => {
   try {
-    const business = await Company.findById(req.user.companyId);
+    const business = await Company.findById(req.user.company);
     if (!business) {
       return res
         .status(404)
@@ -550,7 +697,7 @@ export const resetPassword = async (req, res) => {
 export const getCompanyAuditLogs = async (req, res) => {
   try {
     // 1. Get the company ID from the authenticated user token payload
-    const userCompanyId = req.user.companyId;
+    const userCompanyId = req.user.company;
 
     if (!userCompanyId) {
       return res

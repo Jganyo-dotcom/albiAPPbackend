@@ -56,6 +56,16 @@ export const logAudit = async (
             : `${actorName} logged in successfully`;
         break;
       }
+      // ⭐ NEW CASE: Device Verification Triggered
+      case "LOGIN_VERIFICATION_REQUIRED": {
+        message = `Unfamiliar device detected for ${actorName}. 2FA OTP verification required.`;
+        break;
+      }
+      // ⭐ NEW CASE: Successful Device OTP Entry
+      case "DEVICE_VERIFIED_LOGIN": {
+        message = `${actorName} successfully verified a new device via OTP and logged in`;
+        break;
+      }
       case "CREATE_STAFF": {
         message = `${actorName} registered a new staff profile for ${targetName}`;
         break;
@@ -101,13 +111,6 @@ export const logAudit = async (
             : `${actorName} successfully imported new products in bulk to the stock inventory`;
         break;
       }
-      case "RESTOCK_PRODUCT": {
-        message =
-          status === "Failed"
-            ? `${actorName} failed a restock adjustment attempt`
-            : `${actorName} restocked and increased inventory levels for ${targetName}`;
-        break;
-      }
       case "UPDATE_PRODUCT": {
         message =
           status === "Failed"
@@ -142,7 +145,6 @@ export const logAudit = async (
       // Customer / Billing Message Cases
       case "SERVE_CUSTOMER":
       case "CREATE_CUSTOMER": {
-        // ✨ UPDATED: Appends the basket summaries text cleanly to the log layout string
         message = customDetails
           ? `${actorName} processed a new sale for ${targetName}: ${customDetails}`
           : `${actorName} processed a new sale/bill for ${targetName}`;

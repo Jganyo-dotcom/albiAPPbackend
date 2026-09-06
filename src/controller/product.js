@@ -8,8 +8,8 @@ import { logAudit } from "../utils/audit.js";
  * Helper to safely extract and validate authorization context
  */
 const getAuthContext = (req) => {
-  const companyId = req.user?.companyId;
-  const inputer = req.user?._id || req.user?.id;
+  const companyId = req.user.company;
+  const inputer = req.user._id;
 
   if (!companyId || !inputer) return null;
 
@@ -153,7 +153,7 @@ export const getProducts = async (req, res) => {
         stockQuantity: product.stockQuantity,
         costPrice,
         unitPrice,
-        unitsPerPack:product.unitsPerPack,
+        unitsPerPack: product.unitsPerPack,
         packSellingPrice: product.packSellingPrice,
         margin: parseFloat(margin.toFixed(2)),
         lowStockThreshold: product.lowStockThreshold,

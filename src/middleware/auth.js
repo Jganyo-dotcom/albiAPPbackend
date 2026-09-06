@@ -1,31 +1,63 @@
 import jwt from "jsonwebtoken";
 import User from "../models/user.js";
 
+// Helper function to generate a 6-digit OTP
+const generateOTP = () =>
+  Math.floor(100000 + Math.random() * 900000).toString();
+
 export const protect = async (req, res, next) => {
   let token;
 
-  // 1. Check if token exists in the Authorization header and starts with 'Bearer'
   if (
     req.headers.authorization &&
     req.headers.authorization.startsWith("Bearer")
   ) {
     try {
-      // 2. Extract token from the "Bearer <token>" string
       token = req.headers.authorization.split(" ")[1];
-
-      // 3. Verify the token signature using secret
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-      // 4. Fetch user from DB using decoded ID (exclude password)
+      // Fetch user from DB (Include devices and OTP fields, exclude password)
       const user = await User.findById(decoded.id).select("-password");
 
-      // 5. If user no longer exists in DB, deny access
       if (!user) {
         return res.status(401).json({ message: "User account not found" });
       }
 
-      req.user = decoded; // Extracted directly from JWT
+      // 1. Get Device Identifier (Prioritize a custom header, fallback to User-Agent)
+      const deviceId = req.headers["x-device-id"] || req.headers["user-agent"];
 
+      if (!deviceId) {
+        return res
+          .status(400)
+          .json({ message: "Device identification missing" });
+      }
+
+      // 2. Check if the device is recognized
+      const isDeviceRecognized =
+        user.devices && user.devices.includes(deviceId);
+
+      if (!isDeviceRecognized) {
+        // 3. Generate 6-digit OTP and expiration (e.g., 10 minutes)
+        const otp = generateOTP();
+        user.deviceOtp = otp;
+        user.deviceOtpExpires = Date.now() + 10 * 60 * 1000;
+
+        // Save the pending device temporarily so we know which one to authorize later
+        user.pendingDevice = deviceId;
+        await user.save();
+
+        // 4. TODO: Send OTP to user's email here (e.g., sendEmail(user.email, otp))
+        console.log(`OTP for ${user.email}: ${otp}`);
+
+        return res.status(403).json({
+          message:
+            "Unfamiliar device detected. An OTP has been sent to your email.",
+          requiresOtp: true,
+        });
+      }
+
+      // If device is recognized, attach full user object and proceed
+      req.user = user;
       return next();
     } catch (error) {
       console.error("Token verification error:", error);
@@ -33,7 +65,6 @@ export const protect = async (req, res, next) => {
     }
   }
 
-  // If no token was found at all
   if (!token) {
     return res.status(401).json({ message: "Not authorized, token missing" });
   }
