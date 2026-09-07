@@ -6,6 +6,10 @@ export const registerEmployeeSchema = Joi.object({
     "string.empty": "Name is required",
     "any.required": "Name is required",
   }),
+  role: Joi.string().trim().min(2).required().messages({
+    "string.empty": "Name is required",
+    "any.required": "Name is required",
+  }),
   email: Joi.string().trim().email().required().messages({
     "string.email": "Please provide a valid email address",
     "string.empty": "Email is required",
@@ -15,10 +19,6 @@ export const registerEmployeeSchema = Joi.object({
     "string.min": "Password must be at least 6 characters long",
     "string.empty": "Password is required",
     "any.required": "Password is required",
-  }),
-  confirmPassword: Joi.any().equal(Joi.ref("password")).required().messages({
-    "any.only": "Passwords do not match",
-    "any.required": "Confirm password is required",
   }),
 });
 

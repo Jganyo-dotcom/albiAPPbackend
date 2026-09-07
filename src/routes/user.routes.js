@@ -14,7 +14,7 @@ import {
   verifyDeviceOtp,
 } from "../controller/user.controller.js";
 import { protect } from "../middleware/auth.js";
-import { registerNewEmplyee } from "../controller/managerEmplyee.js";
+import { getAllCompanyEmployees, registerNewEmplyee } from "../controller/managerEmplyee.js";
 
 const router = express.Router();
 
@@ -36,5 +36,6 @@ router.get("/business-settings", getBusinessSettings);
 //////////////////////
 //admin rights route 
 router.post("/create-employee", registerNewEmplyee);
+router.get("/all-employees", getAllCompanyEmployees);
 
 export default router;

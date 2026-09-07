@@ -210,7 +210,7 @@ export const loginUser = async (req, res) => {
 
     const isDeviceRecognized = user.devices && user.devices.includes(deviceId);
 
-    if (!isDeviceRecognized) {
+    if (!isDeviceRecognized && user.role === "Store Admin") {
       const otp = generateOTP();
 
       // Save device OTP configurations to the user document

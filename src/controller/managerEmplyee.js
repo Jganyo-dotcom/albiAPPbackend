@@ -62,3 +62,27 @@ export const registerNewEmplyee = async (req, res) => {
       .json({ message: "Server error during registration" });
   }
 };
+
+export const getAllCompanyEmployees = async (req, res) => {
+  try {
+    const companyId = req.user.company;
+
+    // FIXED: Using standard MongoDB $ne operator to exclude "Store Admin"
+    const employees = await User.find({
+      company: companyId,
+      role: { $ne: "Store Admin" },
+    }).select("-password");
+
+    // Return the list of employees
+    return res.status(200).json({
+      success: true,
+      count: employees.length,
+      employees: employees,
+    });
+  } catch (error) {
+    console.error("Get Company Employees Error:", error);
+    return res.status(500).json({
+      message: "Server error fetching company employees.",
+    });
+  }
+};
