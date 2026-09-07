@@ -25,9 +25,14 @@ const userSchema = new mongoose.Schema(
       required: [true, "Password is required"],
       minlength: 6,
     },
+    phone: {
+      type: String,
+      trim: true,
+      default: "", // Defaults to an empty string if not provided
+    },
     role: {
       type: String,
-      enum: ["Store Admin", "Manager", "Cashier"],
+      enum: ["Store Admin", "Manager", "Cashier", "Store Keeper"],
       default: "Store Admin",
     },
     resetToken: {
@@ -54,7 +59,7 @@ const userSchema = new mongoose.Schema(
     pendingDevice: {
       type: String,
       default: null, // Holds the unknown device until OTP is verified
-    }, 
+    },
     lastOtpResentAt: {
       type: Date,
       default: null,

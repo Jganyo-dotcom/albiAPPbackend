@@ -7,7 +7,7 @@ import { logAudit } from "../utils/audit.js";
 /**
  * Helper to safely extract and validate authorization context
  */
-const getAuthContext = (req) => {
+export const getAuthContext = (req) => {
   const companyId = req.user.company;
   const inputer = req.user._id;
 

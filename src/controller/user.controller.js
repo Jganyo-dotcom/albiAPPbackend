@@ -5,6 +5,11 @@ import Company from "../models/company.js";
 import { sendUniversalMail } from "../utils/mailServices.js";
 import { logAudit } from "../utils/audit.js";
 import AuditLog from "../models/AuditLogsSchema.js";
+import {
+  updatePasswordSchema,
+  updateProfileSchema,
+} from "../validations/managerval.js";
+import { checkPasswordAuth, harsh } from "../utils/hasher.js";
 
 // @desc    Register a new user & company
 // @route   POST /api/auth/register
@@ -216,13 +221,13 @@ export const loginUser = async (req, res) => {
 
       // Trigger your universal mail handler
       // We are passing the code inside 'companyRef' because your template consumes it there
-      // await sendUniversalMail("verification_OTP", {
-      //   recipientEmail: user.email,
-      //   recipientName: user.name,
-      //   subject: "Secure Login: Verify Your New Device",
-      //   companyRef: otp,
-      //   companyName: company.name,
-      // });
+      await sendUniversalMail("verification_OTP", {
+        recipientEmail: user.email,
+        recipientName: user.name,
+        subject: "Secure Login: Verify Your New Device",
+        companyRef: otp,
+        companyName: company.name,
+      });
 
       // Audit log the verification hold
       await logAudit(
@@ -326,9 +331,6 @@ export const verifyDeviceOtp = async (req, res) => {
   }
 };
 
-
-
-
 export const resendDeviceOtp = async (req, res) => {
   try {
     const { companyReference, email } = req.body;
@@ -426,6 +428,103 @@ export const getUserProfile = async (req, res) => {
   }
 };
 
+export const updateUserProfile = async (req, res) => {
+  try {
+    // 1. Validate the incoming data
+    const { error, value } = updateProfileSchema.validate(req.body, {
+      abortEarly: true,
+    });
+    if (error)
+      return res.status(400).json({ message: error.details[0].message });
+
+    const { name, email, phone } = value;
+
+    // 2. Check if the new email is already taken by someone else in this company
+    if (email) {
+      const emailExists = await User.findOne({
+        company: req.user.company,
+        email: email,
+        _id: { $ne: req.user.id }, // Skip checking the current user
+      });
+      if (emailExists) {
+        return res.status(400).json({
+          message:
+            "This email is already taken by another user in this company.",
+        });
+      }
+    }
+
+    // 3. Update the user fields and save to database
+    const user = await User.findOne({
+      _id: req.user.id,
+      company: req.user.company,
+    });
+    if (!user)
+      return res.status(404).json({ message: "User profile not found." });
+
+    if (name) user.name = name;
+    if (email) user.email = email;
+    if (phone) user.phone = phone;
+
+    await user.save();
+
+    // 4. Send back the updated user data safely (without sending the password)
+    return res.status(200).json({
+      message: "Profile updated successfully.",
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+      },
+    });
+  } catch (error) {
+    console.error("Update Profile Error:", error);
+    return res.status(500).json({ message: "Server error updating profile." });
+  }
+};
+
+export const updateUserPassword = async (req, res) => {
+  try {
+    // 1. Validate the incoming passwords
+    const { error, value } = updatePasswordSchema.validate(req.body, {
+      abortEarly: true,
+    });
+    if (error)
+      return res.status(400).json({ message: error.details[0].message });
+
+    const { currentPassword, newPassword } = value;
+
+    // 2. Find the user in the database
+    const user = await User.findOne({
+      _id: req.user.id,
+      company: req.user.company,
+    });
+    if (!user)
+      return res.status(404).json({ message: "User profile not found." });
+
+    // 3. Verify old password (Fixed typo: user.password instead of user.pasword)
+    const isMatch = await checkPasswordAuth(currentPassword, user.password);
+    if (!isMatch) {
+      return res
+        .status(400)
+        .json({ message: "The current password you entered is incorrect." });
+    }
+    console.log(isMatch);
+
+    // 4. Hash and save the new password
+
+    user.password = await harsh(newPassword);
+    await user.save();
+
+    // 5. Send back a clean success message
+    return res.status(200).json({ message: "Password updated successfully." });
+  } catch (error) {
+    console.error("Update Password Error:", error);
+    return res.status(500).json({ message: "Server error updating password." });
+  }
+};
+
 export const getCompanyEmployees = async (req, res) => {
   try {
     // Fixed Mongoose syntax to properly exclude Store Admins ($ne operator)
@@ -518,18 +617,9 @@ export const forgotPassword = async (req, res) => {
 
     if (!company) {
       // AUDIT LOG: Company code does not exist
-      await logAudit(
-        null, // No user ID available
-        "PASSWORD_RESET_REQ", // Action
-        null, // No entity ID
-        "Company", // EntityType
-        "Company", // Path
-        company._id, // No company ID
-        "Failed", // Status
-      );
 
-      return res.status(404).json({
-        message: "Invalid company reference or email address",
+      return res.status(200).json({
+        message: "Password reset link sent to your email address.",
       });
     }
 

@@ -23,40 +23,6 @@ export const protect = async (req, res, next) => {
         return res.status(401).json({ message: "User account not found" });
       }
 
-      // 1. Get Device Identifier (Prioritize a custom header, fallback to User-Agent)
-      const deviceId = req.headers["x-device-id"] || req.headers["user-agent"];
-
-      if (!deviceId) {
-        return res
-          .status(400)
-          .json({ message: "Device identification missing" });
-      }
-
-      // 2. Check if the device is recognized
-      const isDeviceRecognized =
-        user.devices && user.devices.includes(deviceId);
-
-      if (!isDeviceRecognized) {
-        // 3. Generate 6-digit OTP and expiration (e.g., 10 minutes)
-        const otp = generateOTP();
-        user.deviceOtp = otp;
-        user.deviceOtpExpires = Date.now() + 10 * 60 * 1000;
-
-        // Save the pending device temporarily so we know which one to authorize later
-        user.pendingDevice = deviceId;
-        await user.save();
-
-        // 4. TODO: Send OTP to user's email here (e.g., sendEmail(user.email, otp))
-        console.log(`OTP for ${user.email}: ${otp}`);
-
-        return res.status(403).json({
-          message:
-            "Unfamiliar device detected. An OTP has been sent to your email.",
-          requiresOtp: true,
-        });
-      }
-
-      // If device is recognized, attach full user object and proceed
       req.user = user;
       return next();
     } catch (error) {
