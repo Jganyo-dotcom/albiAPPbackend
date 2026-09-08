@@ -165,7 +165,7 @@ export const loginUser = async (req, res) => {
     const company = await Company.findOne({
       reference: normalizedCompanyRef,
     });
-
+    console.log(company._id);
     if (!company) {
       return res
         .status(401)
@@ -538,22 +538,6 @@ export const getCompanyEmployees = async (req, res) => {
     return res
       .status(500)
       .json({ message: "Server error fetching employees." });
-  }
-};
-
-export const getBusinessSettings = async (req, res) => {
-  try {
-    const business = await Company.findById(req.user.company);
-    if (!business) {
-      return res
-        .status(404)
-        .json({ message: "Business profile details not found." });
-    }
-    return res.status(200).json(business);
-  } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Server error fetching business configurations." });
   }
 };
 

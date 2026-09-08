@@ -1,7 +1,6 @@
 import express from "express";
 import {
   forgotPassword,
-  getBusinessSettings,
   getCompanyEmployees,
   getUserProfile,
   loginUser,
@@ -14,7 +13,7 @@ import {
   verifyDeviceOtp,
 } from "../controller/user.controller.js";
 import { protect } from "../middleware/auth.js";
-import { getAllCompanyEmployees, registerNewEmplyee } from "../controller/managerEmplyee.js";
+import { getAllCompanyEmployees, getBusinessConfig, registerNewEmplyee, updateBusinessConfig } from "../controller/managerEmplyeeSettings.js";
 
 const router = express.Router();
 
@@ -31,11 +30,19 @@ router.get("/user/profile", getUserProfile);
 router.post("/user/change-password", updateUserPassword);
 router.patch("/update-user/profile", updateUserProfile);
 router.get("/employees", getCompanyEmployees);
-router.get("/business-settings", getBusinessSettings);
+
 
 //////////////////////
 //admin rights route 
 router.post("/create-employee", registerNewEmplyee);
 router.get("/all-employees", getAllCompanyEmployees);
+
+//////////////////////////////////////
+// settings
+router.put("/business-settings",updateBusinessConfig );
+router.get("/business-settings",getBusinessConfig );
+
+
+
 
 export default router;

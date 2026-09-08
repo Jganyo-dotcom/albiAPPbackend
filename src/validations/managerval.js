@@ -44,3 +44,28 @@ export const updatePasswordSchema = Joi.object({
     "any.required": "Confirm password is required.",
   }),
 });
+
+// Schema for validating store settings changes
+
+
+
+
+export const updateBusinessSchema = Joi.object({
+  name: Joi.string().trim().min(2).required().messages({
+    "string.empty": "Store/Business name is required.",
+  }),
+  companyRef: Joi.string()
+    .trim()
+    .uppercase()
+    .regex(/^[A-Z]{2}-\d{4}$/)
+    .required()
+    .messages({
+      "string.empty": "Store/Business reference is required.",
+      "string.pattern.base": "Reference code must be in the format: 2 letters followed by a hyphen and 4 numbers (e.g., AB-1234).",
+    }),
+  currency: Joi.string().required(),
+  address: Joi.string().trim().allow(""),
+  taxRate: Joi.number().min(0).max(100).required(),
+  receiptMessage: Joi.string().trim().allow(""),
+});
+
