@@ -187,15 +187,6 @@ export const loginUser = async (req, res) => {
     // 4. Verify password match
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      await logAudit(
-        user._id,
-        "LOGIN",
-        user._id,
-        "Company",
-        "Company",
-        company._id,
-        "Failed",
-      );
       return res
         .status(401)
         .json({ message: "Invalid company reference, email, or password" });
