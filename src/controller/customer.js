@@ -135,15 +135,17 @@ export const syncCustomers = async (req, res) => {
         calculatedTotalAmount += itemSubtotal;
 
         // 💎 FIX: Mapped exactly to your updated calculation-free SaleItemSchema
-        saleItems.push({
-          product: dbProduct._id,
-          name: dbProduct.name || item.name,
-          packsSold: packsSold,
-          singlesSold: singlesSold,
-          packPrice: Number(dbProduct.packSellingPrice || 0),
-          singlePrice: Number(dbProduct.unitPrice || 0),
-          packCost: Number(dbProduct.costPricePerPack || 0),
-        });
+        // 🛠️ FIX: Pull fields exactly as defined in your Product schema
+saleItems.push({
+  product: dbProduct._id,
+  name: dbProduct.name || item.name,
+  packsSold,
+  singlesSold,
+  packPrice: Number(dbProduct.packSellingPrice || 0),
+  singlePrice: Number(dbProduct.unitPrice || 0), // Matches your single item price
+  packCost: Number(dbProduct.costPrice || 0),    // Matches your product.costPrice
+});
+
 
         customerItems.push({
           product: dbProduct._id,
@@ -833,7 +835,6 @@ const calculateProductMetrics = async (companyId, dateQuery) => {
         name: { $first: "$items.name" }, 
         category: { $first: { $ifNull: ["$items.category", "Any"] } }, 
         
-        // Sum up metrics based on our calculation-free properties
         packsSold: { $sum: { $ifNull: ["$items.packsSold", 0] } },
         singlesSold: { $sum: { $ifNull: ["$items.singlesSold", 0] } },
         
@@ -847,17 +848,17 @@ const calculateProductMetrics = async (companyId, dateQuery) => {
           }
         },
 
-        // Dynamic Cost: (Packs * packCost) + (Singles * (packCost / unitsPerPack))
+        // Dynamic Cost: (Packs * packCost) + (Singles * singleCost)
         totalCost: {
           $sum: {
             $add: [
               // 1. Bulk pack expense total
               { $multiply: [{ $ifNull: ["$items.packsSold", 0] }, { $ifNull: ["$items.packCost", 0] }] },
-              // 2. Single item expense total (derived safely using packCost)
+              // 2. Single item expense total (Deducts single item cost)
               {
                 $multiply: [
                   { $ifNull: ["$items.singlesSold", 0] },
-                  { $ifNull: ["$items.packCost", 0] } // Fallback baseline proxy cost matching your controller logic
+                  { $ifNull: ["$items.singleCost", 0] }
                 ]
               }
             ]
