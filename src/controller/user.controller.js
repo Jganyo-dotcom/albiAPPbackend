@@ -165,7 +165,6 @@ export const loginUser = async (req, res) => {
     const company = await Company.findOne({
       reference: normalizedCompanyRef,
     });
-    console.log(company._id);
     if (!company) {
       return res
         .status(401)
