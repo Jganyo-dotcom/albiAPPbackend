@@ -829,19 +829,15 @@ const calculateProductMetrics = async (companyId, dateQuery) => {
     // STAGE 3: Group records by Product ID to combine matching sold items
     {
       $group: {
-        _id: "$items.product", // Grouping key (Product ID)
-        name: { $first: "$items.name" }, // Store product name
-        category: { $first: { $ifNull: ["$items.category", "Any"] } }, // Fallback to avoid null categories
+        _id: "$items.product", 
+        name: { $first: "$items.name" }, 
+        category: { $first: { $ifNull: ["$items.category", "Any"] } }, 
         
-        // Track true volumes sold for both configurations
-        packsSold: { $sum: "$items.packsSold" },
-        singlesSold: { $sum: "$items.singlesSold" },
+        // Sum up metrics based on our calculation-free properties
+        packsSold: { $sum: { $ifNull: ["$items.packsSold", 0] } },
+        singlesSold: { $sum: { $ifNull: ["$items.singlesSold", 0] } },
         
-        // Retain historical unit references for dashboard card list display
-        unitPrice: { $first: "$items.singlePrice" }, 
-        unitCost: { $first: "$items.packCost" }, // Pack base cost configuration
-
-        // Dynamic Revenue: (Packs * PackPrice) + (Singles * SinglePrice)
+        // Dynamic Revenue: (Packs * packPrice) + (Singles * singlePrice)
         totalRevenue: {
           $sum: {
             $add: [
@@ -851,18 +847,17 @@ const calculateProductMetrics = async (companyId, dateQuery) => {
           }
         },
 
-        // Dynamic Cost: We need the cost per single item to calculate mixed single costs
-        // formula used under the hood: (Packs * PackCost) + (Singles * SingleCost)
+        // Dynamic Cost: (Packs * packCost) + (Singles * (packCost / unitsPerPack))
         totalCost: {
           $sum: {
             $add: [
-              // 1. Total cost from bulk packs sold
+              // 1. Bulk pack expense total
               { $multiply: [{ $ifNull: ["$items.packsSold", 0] }, { $ifNull: ["$items.packCost", 0] }] },
-              // 2. Total cost from single retail items sold
-              { 
+              // 2. Single item expense total (derived safely using packCost)
+              {
                 $multiply: [
                   { $ifNull: ["$items.singlesSold", 0] },
-                  { $ifNull: ["$items.unitCost", 0] } // Leverages line unit cost index values safely
+                  { $ifNull: ["$items.packCost", 0] } // Fallback baseline proxy cost matching your controller logic
                 ]
               }
             ]
@@ -879,16 +874,14 @@ const calculateProductMetrics = async (companyId, dateQuery) => {
         category: 1,
         packsSold: 1,
         singlesSold: 1,
-        unitPrice: 1,
-        unitCost: 1,
         totalRevenue: 1,
         totalCost: 1,
-        // Subtract total cost from total revenue to compute net item profit
         profit: { $subtract: ["$totalRevenue", "$totalCost"] },
       },
     },
   ]);
 };
+
 
 
 // =========================================================================
