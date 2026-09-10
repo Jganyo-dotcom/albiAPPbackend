@@ -100,6 +100,10 @@ export const syncCustomers = async (req, res) => {
         let unitCost = 0;
         let unitsToDeduct = 0;
 
+        // 🛠️ SAFE CAPTURE: Initialize variables for your target schema
+        let packsSold = 0;
+        let singlesSold = 0;
+
         if (isPackSale) {
           unitPrice = Number(
             dbProduct.packSellingPrice ||
@@ -110,6 +114,9 @@ export const syncCustomers = async (req, res) => {
               dbProduct.costPrice * (dbProduct.unitsPerPack || 1),
           );
           unitsToDeduct = qty * (dbProduct.unitsPerPack || 1);
+          
+          // 📦 Map item.qty straight to packs tracker
+          packsSold = qty;
 
           // Add Pack tag summary string tracker
           itemSummaries.push(`${qty}x ${dbProduct.name} (Pack)`);
@@ -117,6 +124,9 @@ export const syncCustomers = async (req, res) => {
           unitPrice = Number(dbProduct.unitPrice ?? item.unitPrice ?? 0);
           unitCost = Number(dbProduct.costPrice ?? item.unitCost ?? 0);
           unitsToDeduct = qty;
+          
+          // 🛒 Map item.qty straight to singles tracker
+          singlesSold = qty;
 
           itemSummaries.push(`${qty}x ${dbProduct.name}`);
         }
@@ -124,13 +134,15 @@ export const syncCustomers = async (req, res) => {
         const itemSubtotal = unitPrice * qty;
         calculatedTotalAmount += itemSubtotal;
 
+        // 💎 FIX: Mapped exactly to your updated calculation-free SaleItemSchema
         saleItems.push({
           product: dbProduct._id,
           name: dbProduct.name || item.name,
-          category: dbProduct.category || "Any",
-          qty,
-          unitPrice,
-          unitCost,
+          packsSold: packsSold,
+          singlesSold: singlesSold,
+          packPrice: Number(dbProduct.packSellingPrice || 0),
+          singlePrice: Number(dbProduct.unitPrice || 0),
+          packCost: Number(dbProduct.costPricePerPack || 0),
         });
 
         customerItems.push({
@@ -246,6 +258,7 @@ export const syncCustomers = async (req, res) => {
     });
   }
 };
+
 
 /**
  * 2. GET /api/sales
@@ -818,28 +831,54 @@ const calculateProductMetrics = async (companyId, dateQuery) => {
       $group: {
         _id: "$items.product", // Grouping key (Product ID)
         name: { $first: "$items.name" }, // Store product name
-        category: { $first: "$items.category" }, // Store category
-        unitsSold: { $sum: "$items.qty" }, // Add up total quantity sold
-        unitPrice: { $first: "$items.unitPrice" }, // Record selling price
-        unitCost: { $first: "$items.unitCost" }, // Record purchase cost
+        category: { $first: { $ifNull: ["$items.category", "Any"] } }, // Fallback to avoid null categories
+        
+        // Track true volumes sold for both configurations
+        packsSold: { $sum: "$items.packsSold" },
+        singlesSold: { $sum: "$items.singlesSold" },
+        
+        // Retain historical unit references for dashboard card list display
+        unitPrice: { $first: "$items.singlePrice" }, 
+        unitCost: { $first: "$items.packCost" }, // Pack base cost configuration
 
-        // Total Revenue = (unit price * quantity) added up across all sales
+        // Dynamic Revenue: (Packs * PackPrice) + (Singles * SinglePrice)
         totalRevenue: {
-          $sum: { $multiply: ["$items.unitPrice", "$items.qty"] },
+          $sum: {
+            $add: [
+              { $multiply: [{ $ifNull: ["$items.packsSold", 0] }, { $ifNull: ["$items.packPrice", 0] }] },
+              { $multiply: [{ $ifNull: ["$items.singlesSold", 0] }, { $ifNull: ["$items.singlePrice", 0] }] }
+            ]
+          }
         },
 
-        // Total Cost = (cost price * quantity) added up across all sales
-        totalCost: { $sum: { $multiply: ["$items.unitCost", "$items.qty"] } },
+        // Dynamic Cost: We need the cost per single item to calculate mixed single costs
+        // formula used under the hood: (Packs * PackCost) + (Singles * SingleCost)
+        totalCost: {
+          $sum: {
+            $add: [
+              // 1. Total cost from bulk packs sold
+              { $multiply: [{ $ifNull: ["$items.packsSold", 0] }, { $ifNull: ["$items.packCost", 0] }] },
+              // 2. Total cost from single retail items sold
+              { 
+                $multiply: [
+                  { $ifNull: ["$items.singlesSold", 0] },
+                  { $ifNull: ["$items.unitCost", 0] } // Leverages line unit cost index values safely
+                ]
+              }
+            ]
+          }
+        },
       },
     },
 
-    // STAGE 4: Reshape fields and compute net profit per product
+    // STAGE 4: Reshape fields and compute net profit per product cleanly
     {
       $project: {
         id: "$_id",
         name: 1,
         category: 1,
-        unitsSold: 1,
+        packsSold: 1,
+        singlesSold: 1,
         unitPrice: 1,
         unitCost: 1,
         totalRevenue: 1,
@@ -850,6 +889,7 @@ const calculateProductMetrics = async (companyId, dateQuery) => {
     },
   ]);
 };
+
 
 // =========================================================================
 // 🛠️ HELPER 3: CALCULATE OPERATIONAL OVERHEAD EXPENSES

@@ -10,6 +10,8 @@ const saleItemSchema = new mongoose.Schema(
     },
     name: { type: String, required: true },
     qty: { type: Number, required: true, default: 1, min: 1 },
+    packsSold: { type: Number, default: 0, min: 0 },
+    singlesSold: { type: Number, default: 0, min: 0 },
     unitPrice: { type: Number, required: true, default: 0 },
     unitCost: { type: Number, default: 0 }, // Optional: helpful for calculating profit margins later
   },
