@@ -13,7 +13,7 @@ import Company from "../models/company.js";
  * Helper to safely extract and validate authorization context
  */
 const getAuthContext = (req) => {
-  const companyId = req.user?.companyId;
+  const companyId = req.user?.company;
   const inputer = req.user?._id || req.user?.id;
 
   if (!companyId || !inputer) return null;
