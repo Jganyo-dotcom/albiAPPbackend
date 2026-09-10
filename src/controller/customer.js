@@ -136,15 +136,17 @@ export const syncCustomers = async (req, res) => {
 
         // 💎 FIX: Mapped exactly to your updated calculation-free SaleItemSchema
         // 🛠️ FIX: Pull fields exactly as defined in your Product schema
+// 🛠️ EXACT MATCH: Saving the product prices safely into the sale item document
 saleItems.push({
   product: dbProduct._id,
   name: dbProduct.name || item.name,
-  packsSold,
-  singlesSold,
-  packPrice: Number(dbProduct.packSellingPrice || 0),
-  singlePrice: Number(dbProduct.unitPrice || 0), // Matches your single item price
-  packCost: Number(dbProduct.costPrice || 0),    // Matches your product.costPrice
+  packsSold: packsSold,
+  singlesSold: singlesSold,
+  packPrice: Number(dbProduct.packSellingPrice || 0), // maps packSellingPrice from Product
+  singlePrice: Number(dbProduct.unitPrice || 0),      // maps unitPrice from Product
+  packCost: Number(dbProduct.costPricePerPack || dbProduct.costPrice || 0), // maps pack cost
 });
+
 
 
         customerItems.push({
@@ -838,7 +840,7 @@ const calculateProductMetrics = async (companyId, dateQuery) => {
         packsSold: { $sum: { $ifNull: ["$items.packsSold", 0] } },
         singlesSold: { $sum: { $ifNull: ["$items.singlesSold", 0] } },
         
-        // Dynamic Revenue: (Packs * packPrice) + (Singles * singlePrice)
+        // True Revenue Math: (Packs * packPrice) + (Singles * singlePrice)
         totalRevenue: {
           $sum: {
             $add: [
@@ -848,19 +850,12 @@ const calculateProductMetrics = async (companyId, dateQuery) => {
           }
         },
 
-        // Dynamic Cost: (Packs * packCost) + (Singles * singleCost)
+        // True Cost Math: (Packs * packCost) + (Singles * packCost)
         totalCost: {
           $sum: {
             $add: [
-              // 1. Bulk pack expense total
               { $multiply: [{ $ifNull: ["$items.packsSold", 0] }, { $ifNull: ["$items.packCost", 0] }] },
-              // 2. Single item expense total (Deducts single item cost)
-              {
-                $multiply: [
-                  { $ifNull: ["$items.singlesSold", 0] },
-                  { $ifNull: ["$items.singleCost", 0] }
-                ]
-              }
+              { $multiply: [{ $ifNull: ["$items.singlesSold", 0] }, { $ifNull: ["$items.packCost", 0] }] }
             ]
           }
         },
