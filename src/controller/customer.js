@@ -80,8 +80,6 @@ export const syncCustomers = async (req, res) => {
       let calculatedTotalAmount = 0;
       const saleItems = [];
       const customerItems = [];
-
-      // ✨ NEW: Temporary array to log item counts + names for the log sentence
       const itemSummaries = [];
 
       for (const item of c.items || []) {
@@ -99,33 +97,26 @@ export const syncCustomers = async (req, res) => {
         let unitPrice = 0;
         let unitCost = 0;
         let unitsToDeduct = 0;
-
-        // 🛠️ SAFE CAPTURE: Initialize variables for your target schema
         let packsSold = 0;
         let singlesSold = 0;
 
         if (isPackSale) {
           unitPrice = Number(
             dbProduct.packSellingPrice ||
-              dbProduct.unitPrice * (dbProduct.unitsPerPack || 1),
+              dbProduct.unitPrice * (dbProduct.unitsPerPack || 1)
           );
           unitCost = Number(
             dbProduct.costPricePerPack ||
-              dbProduct.costPrice * (dbProduct.unitsPerPack || 1),
+              dbProduct.costPrice * (dbProduct.unitsPerPack || 1)
           );
           unitsToDeduct = qty * (dbProduct.unitsPerPack || 1);
-          
-          // 📦 Map item.qty straight to packs tracker
           packsSold = qty;
 
-          // Add Pack tag summary string tracker
           itemSummaries.push(`${qty}x ${dbProduct.name} (Pack)`);
         } else {
           unitPrice = Number(dbProduct.unitPrice ?? item.unitPrice ?? 0);
           unitCost = Number(dbProduct.costPrice ?? item.unitCost ?? 0);
           unitsToDeduct = qty;
-          
-          // 🛒 Map item.qty straight to singles tracker
           singlesSold = qty;
 
           itemSummaries.push(`${qty}x ${dbProduct.name}`);
@@ -134,20 +125,16 @@ export const syncCustomers = async (req, res) => {
         const itemSubtotal = unitPrice * qty;
         calculatedTotalAmount += itemSubtotal;
 
-        // 💎 FIX: Mapped exactly to your updated calculation-free SaleItemSchema
-        // 🛠️ FIX: Pull fields exactly as defined in your Product schema
-// 🛠️ EXACT MATCH: Saving the product prices safely into the sale item document
-saleItems.push({
-  product: dbProduct._id,
-  name: dbProduct.name || item.name,
-  packsSold: packsSold,
-  singlesSold: singlesSold,
-  packPrice: Number(dbProduct.packSellingPrice || 0), // maps packSellingPrice from Product
-  singlePrice: Number(dbProduct.unitPrice || 0),      // maps unitPrice from Product
-  packCost: Number(dbProduct.costPricePerPack || dbProduct.costPrice || 0), // maps pack cost
-});
-
-
+        // 💎 FIXED: Maps strictly to your actual SaleItemSchema keys
+        saleItems.push({
+          product: dbProduct._id,
+          name: dbProduct.name || item.name,
+          qty: qty,
+          packsSold: packsSold,
+          singlesSold: singlesSold,
+          unitPrice: unitPrice, // Storing correct computed transactional price
+          unitCost: unitCost,   // Storing correct computed transactional cost
+        });
 
         customerItems.push({
           product: dbProduct._id,
@@ -182,7 +169,7 @@ saleItems.push({
         phone: phoneTrimmed,
         companyId,
       });
-      console.log(c.email);
+
       if (!customerRecord) {
         customerRecord = await Customer.create({
           companyId,
@@ -229,10 +216,8 @@ saleItems.push({
 
       createdSales.push(newSale);
 
-      // ✨ Join items into a comma-separated sentence breakdown line
       const basketSummaryText = itemSummaries.join(", ");
 
-      // 🔄 Trigger Security Audit Log with custom item breakdowns
       await logAudit(
         inputer,
         "SERVE_CUSTOMER",
@@ -241,7 +226,7 @@ saleItems.push({
         "Customer",
         companyId,
         "Successful",
-        basketSummaryText, // Pass text payload summary here
+        basketSummaryText,
       );
     }
 
@@ -262,6 +247,7 @@ saleItems.push({
     });
   }
 };
+
 
 
 /**
@@ -837,27 +823,18 @@ const calculateProductMetrics = async (companyId, dateQuery) => {
         name: { $first: "$items.name" }, 
         category: { $first: { $ifNull: ["$items.category", "Any"] } }, 
         
+        // Sum up metrics based on our actual stored database fields
         packsSold: { $sum: { $ifNull: ["$items.packsSold", 0] } },
         singlesSold: { $sum: { $ifNull: ["$items.singlesSold", 0] } },
         
-        // True Revenue Math: (Packs * packPrice) + (Singles * singlePrice)
+        // Dynamic Revenue: Added up natively across all matched row items
         totalRevenue: {
-          $sum: {
-            $add: [
-              { $multiply: [{ $ifNull: ["$items.packsSold", 0] }, { $ifNull: ["$items.packPrice", 0] }] },
-              { $multiply: [{ $ifNull: ["$items.singlesSold", 0] }, { $ifNull: ["$items.singlePrice", 0] }] }
-            ]
-          }
+          $sum: { $multiply: [{ $ifNull: ["$items.unitPrice", 0] }, { $ifNull: ["$items.qty", 0] }] }
         },
 
-        // True Cost Math: (Packs * packCost) + (Singles * packCost)
+        // Dynamic Cost: Added up natively across all matched row items
         totalCost: {
-          $sum: {
-            $add: [
-              { $multiply: [{ $ifNull: ["$items.packsSold", 0] }, { $ifNull: ["$items.packCost", 0] }] },
-              { $multiply: [{ $ifNull: ["$items.singlesSold", 0] }, { $ifNull: ["$items.packCost", 0] }] }
-            ]
-          }
+          $sum: { $multiply: [{ $ifNull: ["$items.unitCost", 0] }, { $ifNull: ["$items.qty", 0] }] }
         },
       },
     },
