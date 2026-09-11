@@ -102,14 +102,12 @@ export const syncCustomers = async (req, res) => {
 
         if (isPackSale) {
           unitPrice = Number(
-            dbProduct.packSellingPrice ||
-              dbProduct.unitPrice * (dbProduct.unitsPerPack || 1),
+            dbProduct.packSellingPrice * (dbProduct.unitsPerPack || 1),
           );
           unitCost = Number(
-            dbProduct.costPricePerPack ||
-              dbProduct.costPrice * (dbProduct.unitsPerPack || 1),
+            dbProduct.costPricePerPack * dbProduct.unitsPerPack,
           );
-          unitsToDeduct = qty * (dbProduct.unitsPerPack || 1);
+          unitsToDeduct = qty * dbProduct.unitsPerPack;
 
           // Add Pack tag summary string tracker
           itemSummaries.push(`${qty}x ${dbProduct.name} (Pack)`);
