@@ -24,7 +24,7 @@ export const registerUser = async (req, res) => {
       });
     }
 
-    return res.status(200).json({
+    return res.status(401).json({
       message: "Elikem Ganyo has closed registration.",
     });
 
