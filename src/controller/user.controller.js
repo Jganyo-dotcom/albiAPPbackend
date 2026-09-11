@@ -24,6 +24,10 @@ export const registerUser = async (req, res) => {
       });
     }
 
+    return res.status(200).json({
+      message: "Elikem Ganyo has closed registration.",
+    });
+
     // 2. Normalize email to prevent case-sensitivity login bugs
     const normalizedEmail = email.toLowerCase().trim();
 
@@ -99,12 +103,12 @@ export const registerUser = async (req, res) => {
 
     // 9. Non-blocking Mail Delivery (Won't fail registration if mailer is down)
     try {
-      sendUniversalMail("verification_Mail", {
-        recipientEmail: normalizedEmail,
-        recipientName: user.name,
-        companyRef: generatedReference,
-        subject: "Your Credentials are Ready",
-      });
+      // sendUniversalMail("verification_Mail", {
+      //   recipientEmail: normalizedEmail,
+      //   recipientName: user.name,
+      //   companyRef: generatedReference,
+      //   subject: "Your Credentials are Ready",
+      // });
     } catch (mailError) {
       console.error(
         "Warning: Registration email failed to send:",

@@ -80,8 +80,6 @@ export const syncCustomers = async (req, res) => {
       let calculatedTotalAmount = 0;
       const saleItems = [];
       const customerItems = [];
-
-      // ✨ NEW: Temporary array to log item counts + names for the log sentence
       const itemSummaries = [];
 
       for (const item of c.items || []) {
@@ -99,22 +97,27 @@ export const syncCustomers = async (req, res) => {
         let unitPrice = 0;
         let unitCost = 0;
         let unitsToDeduct = 0;
+        let packsSold = 0;
+        let singlesSold = 0;
 
         if (isPackSale) {
           unitPrice = Number(
-            dbProduct.packSellingPrice * (dbProduct.unitsPerPack || 1),
+            dbProduct.packSellingPrice ||
+              dbProduct.unitPrice * (dbProduct.unitsPerPack || 1)
           );
           unitCost = Number(
-            dbProduct.costPricePerPack * dbProduct.unitsPerPack,
+            dbProduct.costPricePerPack ||
+              dbProduct.costPrice * (dbProduct.unitsPerPack || 1)
           );
-          unitsToDeduct = qty * dbProduct.unitsPerPack;
+          unitsToDeduct = qty * (dbProduct.unitsPerPack || 1);
+          packsSold = qty;
 
-          // Add Pack tag summary string tracker
           itemSummaries.push(`${qty}x ${dbProduct.name} (Pack)`);
         } else {
           unitPrice = Number(dbProduct.unitPrice ?? item.unitPrice ?? 0);
           unitCost = Number(dbProduct.costPrice ?? item.unitCost ?? 0);
           unitsToDeduct = qty;
+          singlesSold = qty;
 
           itemSummaries.push(`${qty}x ${dbProduct.name}`);
         }
@@ -122,13 +125,15 @@ export const syncCustomers = async (req, res) => {
         const itemSubtotal = unitPrice * qty;
         calculatedTotalAmount += itemSubtotal;
 
+        // 💎 FIXED: Maps strictly to your actual SaleItemSchema keys
         saleItems.push({
           product: dbProduct._id,
           name: dbProduct.name || item.name,
-          category: dbProduct.category || "Any",
-          qty,
-          unitPrice,
-          unitCost,
+          qty: qty,
+          packsSold: packsSold,
+          singlesSold: singlesSold,
+          unitPrice: unitPrice, // Storing correct computed transactional price
+          unitCost: unitCost,   // Storing correct computed transactional cost
         });
 
         customerItems.push({
@@ -164,7 +169,7 @@ export const syncCustomers = async (req, res) => {
         phone: phoneTrimmed,
         companyId,
       });
-      console.log(c.email);
+
       if (!customerRecord) {
         customerRecord = await Customer.create({
           companyId,
@@ -211,10 +216,8 @@ export const syncCustomers = async (req, res) => {
 
       createdSales.push(newSale);
 
-      // ✨ Join items into a comma-separated sentence breakdown line
       const basketSummaryText = itemSummaries.join(", ");
 
-      // 🔄 Trigger Security Audit Log with custom item breakdowns
       await logAudit(
         inputer,
         "SERVE_CUSTOMER",
@@ -223,7 +226,7 @@ export const syncCustomers = async (req, res) => {
         "Customer",
         companyId,
         "Successful",
-        basketSummaryText, // Pass text payload summary here
+        basketSummaryText,
       );
     }
 
@@ -244,6 +247,8 @@ export const syncCustomers = async (req, res) => {
     });
   }
 };
+
+
 
 /**
  * 2. GET /api/sales
@@ -814,40 +819,43 @@ const calculateProductMetrics = async (companyId, dateQuery) => {
     // STAGE 3: Group records by Product ID to combine matching sold items
     {
       $group: {
-        _id: "$items.product", // Grouping key (Product ID)
-        name: { $first: "$items.name" }, // Store product name
-        category: { $first: "$items.category" }, // Store category
-        unitsSold: { $sum: "$items.qty" }, // Add up total quantity sold
-        unitPrice: { $first: "$items.unitPrice" }, // Record selling price
-        unitCost: { $first: "$items.unitCost" }, // Record purchase cost
-
-        // Total Revenue = (unit price * quantity) added up across all sales
+        _id: "$items.product", 
+        name: { $first: "$items.name" }, 
+        category: { $first: { $ifNull: ["$items.category", "Any"] } }, 
+        
+        // Sum up metrics based on our actual stored database fields
+        packsSold: { $sum: { $ifNull: ["$items.packsSold", 0] } },
+        singlesSold: { $sum: { $ifNull: ["$items.singlesSold", 0] } },
+        
+        // Dynamic Revenue: Added up natively across all matched row items
         totalRevenue: {
-          $sum: { $multiply: ["$items.unitPrice", "$items.qty"] },
+          $sum: { $multiply: [{ $ifNull: ["$items.unitPrice", 0] }, { $ifNull: ["$items.qty", 0] }] }
         },
 
-        // Total Cost = (cost price * quantity) added up across all sales
-        totalCost: { $sum: { $multiply: ["$items.unitCost", "$items.qty"] } },
+        // Dynamic Cost: Added up natively across all matched row items
+        totalCost: {
+          $sum: { $multiply: [{ $ifNull: ["$items.unitCost", 0] }, { $ifNull: ["$items.qty", 0] }] }
+        },
       },
     },
 
-    // STAGE 4: Reshape fields and compute net profit per product
+    // STAGE 4: Reshape fields and compute net profit per product cleanly
     {
       $project: {
         id: "$_id",
         name: 1,
         category: 1,
-        unitsSold: 1,
-        unitPrice: 1,
-        unitCost: 1,
+        packsSold: 1,
+        singlesSold: 1,
         totalRevenue: 1,
         totalCost: 1,
-        // Subtract total cost from total revenue to compute net item profit
         profit: { $subtract: ["$totalRevenue", "$totalCost"] },
       },
     },
   ]);
 };
+
+
 
 // =========================================================================
 // 🛠️ HELPER 3: CALCULATE OPERATIONAL OVERHEAD EXPENSES
